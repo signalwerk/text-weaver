@@ -22,7 +22,7 @@
  * Env (.env supported):
  *   OPENAI_API_KEY=sk-...   (required unless --no-llm is used)
  *   OPENAI_MODEL=gpt-4o-mini
- *   MAX_CANDIDATES_PER_CALL=300
+ *   MAX_CANDIDATES_PER_CALL=20
  *   CONFIDENCE_THRESHOLD=0.7
  *   WORD_CONTEXT_BEFORE=6
  *   WORD_CONTEXT_AFTER=6
@@ -75,7 +75,7 @@ if (!NO_LLM && !OPENAI_API_KEY) {
 }
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const MAX_CANDIDATES_PER_CALL = Number(
-  process.env.MAX_CANDIDATES_PER_CALL || 300,
+  process.env.MAX_CANDIDATES_PER_CALL || 20,
 );
 const CONFIDENCE_THRESHOLD = Number(process.env.CONFIDENCE_THRESHOLD || 0.7);
 const WORD_CONTEXT_BEFORE = Number(process.env.WORD_CONTEXT_BEFORE || 6);
@@ -202,16 +202,17 @@ function buildHyphenCandidates(text) {
     const spanStart = idx + leftWord.length;
     const spanEnd = spanStart + hyphenBlockLen;
 
-    // Word-based context windows
-    const left_context = wordContextBefore(
-      text,
-      spanStart,
-      WORD_CONTEXT_BEFORE,
-    );
-    const right_context = wordContextAfter(text, spanEnd, WORD_CONTEXT_AFTER);
-
-    // Right token preview
+    // Right token (first word after the split)
     const rightToken = rightWordToken(text, spanEnd);
+
+    // Word-based context windows
+    // Left context: words before the split word, then the split word with hyphen
+    const beforeLeft = wordContextBefore(text, idx, WORD_CONTEXT_BEFORE);
+    const left_context = (beforeLeft ? beforeLeft + " " : "") + leftWord + "-";
+    
+    // Right context: right token, then words after it
+    const afterRight = wordContextAfter(text, spanEnd + rightToken.length, WORD_CONTEXT_AFTER);
+    const right_context = rightToken + (afterRight ? " " + afterRight : "");
 
     cands.push({
       id: `h_${cands.length + 1}`,
@@ -220,11 +221,8 @@ function buildHyphenCandidates(text) {
       leftWord,
       rightToken,
       fragments: {
-        left_line_end: leftWord + "-",
-        right_line_start: text.slice(
-          spanEnd,
-          Math.min(text.length, spanEnd + 32),
-        ),
+        start: leftWord + "-",
+        end: rightToken,
       },
       left_context,
       right_context,
@@ -304,15 +302,9 @@ function buildPrompt(original, candidates) {
           properties: {
             id: { type: "string" },
             decision: { enum: ["UNHYPHENATE", "KEEP_HYPHEN_JOIN"] },
-            // Span-only replacement:
-            // UNHYPHENATE -> "" (delete the span)
-            // KEEP_HYPHEN_JOIN -> "-" (keep the hyphen, remove break+spaces)
-            replacement: { type: "string" },
             confidence: { type: "number" },
-            rationale_short: { type: "string" },
-            flag_review: { type: "boolean" },
           },
-          required: ["id", "decision", "replacement", "confidence"],
+          required: ["id", "decision", "confidence"],
         },
       },
     },
@@ -321,12 +313,12 @@ function buildPrompt(original, candidates) {
 
   const system = `You classify ONLY hyphen-at-line-end splits and return strict JSON.
 - Languages: German and English.
-- Never modify text outside the candidate span.
 - Decisions:
-  • UNHYPHENATE: remove trailing '-' + linebreak and join fragments (e.g., Kompe-\\ntenzen -> Kompetenzen).
-  • KEEP_HYPHEN_JOIN: keep real hyphenated compound; remove only the linebreak (Peer-to-\\nPeer -> Peer-to-Peer).
-- Do NOT normalize punctuation or spacing beyond the span.
-- Use high confidence when the choice is clear (e.g., dictionary/common compounds, keep list patterns).
+  • UNHYPHENATE: the hyphen is a word-split artifact; join fragments (e.g., Kompe-\\ntenzen -> Kompetenzen).
+  • KEEP_HYPHEN_JOIN: the hyphen is part of a real compound word; keep it (Peer-to-\\nPeer -> Peer-to-Peer).
+- Use high confidence (0.9+) when the choice is clear (e.g., dictionary words, common compounds).
+- Use medium confidence (0.7-0.9) when context helps but there's some ambiguity.
+- Use low confidence (<0.7) when genuinely uncertain.
 - Output MUST be valid JSON per schema; no extra text.`;
 
   // Minimal few-shot example (assistant shows JSON only)
@@ -334,19 +326,15 @@ function buildPrompt(original, candidates) {
     candidates: [
       {
         id: "ex1",
-        type: "HYPHEN_SPLIT",
-        span: { start: 19, end: 22 },
-        fragments: { left_line_end: "Kompe-", right_line_start: "tenzen" },
+        fragments: { start: "Kompe-", end: "tenzen" },
         left_context: "Methoden den Kompe-",
-        right_context: "tenzen und der …",
+        right_context: "tenzen und der",
       },
       {
         id: "ex2",
-        type: "HYPHEN_SPLIT",
-        span: { start: 66, end: 70 },
-        fragments: { left_line_end: "Peer-to-", right_line_start: "Peer" },
-        left_context: "… ist Peer-to-",
-        right_context: "Peer kompatibel …",
+        fragments: { start: "Peer-to-", end: "Peer" },
+        left_context: "ist Peer-to-",
+        right_context: "Peer kompatibel",
       },
     ],
     output_schema,
@@ -358,16 +346,12 @@ function buildPrompt(original, candidates) {
       {
         id: "ex1",
         decision: "UNHYPHENATE",
-        replacement: "",
         confidence: 0.97,
-        flag_review: false,
       },
       {
         id: "ex2",
         decision: "KEEP_HYPHEN_JOIN",
-        replacement: "-",
         confidence: 0.98,
-        flag_review: false,
       },
     ],
   };
@@ -375,8 +359,6 @@ function buildPrompt(original, candidates) {
   const userPayload = {
     candidates: candidates.map((c) => ({
       id: c.id,
-      type: c.type,
-      span: c.span,
       fragments: c.fragments,
       left_context: c.left_context,
       right_context: c.right_context,
@@ -479,7 +461,7 @@ async function callOpenAIChatJSON({ model, system, userPayload, batchNumber }) {
     );
   }
 
-  // Validate that each decision has required fields
+  // Validate and enhance decisions with automatic replacement
   for (const decision of parsed.decisions) {
     if (!decision.id || typeof decision.id !== "string") {
       throw new Error(
@@ -494,9 +476,9 @@ async function callOpenAIChatJSON({ model, system, userPayload, batchNumber }) {
         `Decision '${decision.id}' has invalid 'decision' field: ${decision.decision}`,
       );
     }
-    if (decision.replacement === undefined) {
-      throw new Error(`Decision '${decision.id}' missing 'replacement' field`);
-    }
+
+    // Automatically calculate replacement based on decision
+    decision.replacement = decision.decision === "UNHYPHENATE" ? "" : "-";
   }
 
   return parsed.decisions;
@@ -518,7 +500,6 @@ function applyHyphenPatches(original, candidates, decisions, threshold) {
         id: d.id,
         decision: d.decision,
         confidence: d.confidence,
-        rationale_short: d.rationale_short || "",
       });
       continue;
     }
@@ -530,7 +511,6 @@ function applyHyphenPatches(original, candidates, decisions, threshold) {
         replacement: d.replacement, // "" or "-"
         decision: d.decision,
         confidence: d.confidence,
-        rationale_short: d.rationale_short || "",
       });
     }
   }
@@ -596,7 +576,6 @@ function joinSoftLinebreaksDefault(text) {
           replacement: "-",
           decision: "KEEP_HYPHEN_JOIN",
           confidence: 1.0,
-          rationale_short: "rule",
         });
       } else {
         llmCands.push(c);

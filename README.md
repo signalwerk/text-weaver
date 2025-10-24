@@ -31,30 +31,33 @@ If the model’s **confidence < 0.7**, no change is applied to that spot and it�
 **Input**
 
 ```
-How do we ensure
-that the chosen
-methods align with compe-
-tence and the
-expertise of co-
-workers?
+This document tests vari-
+ous hyphenation scenar-
+ios.
+
+The system uses state-of-the-
+art Machine-Learning.
 ```
 
 **Output**
 
 ```
-How do we ensure that the chosen methods align with competence and the expertise of co-workers?
+This document tests various hyphenation scenarios.
+
+The system uses state-of-the-art Machine-Learning.
 ```
 
-- `compe-\n tence` → **UNHYPHENATE** → `competence`
-- `co-\n workers` → **UNHYPHENATE** → `coworkers` (if the model deems it a single word)
-- If the model instead detects a true compound, it would return **KEEP_HYPHEN_JOIN** (e.g., `peer-to-\n peer` → `peer-to-peer`).
+**What happened:**
+
+- `vari-\nous` → **UNHYPHENATE** (LLM decision) → `various`
+- `scenar-\nios` → **UNHYPHENATE** (LLM decision) → `scenarios`
+- `state-of-the-\nart` → **KEEP_HYPHEN_JOIN** (from keep-hyphens.txt) → `state-of-the-art`
 - All other single line breaks were joined with a space.
 
-## Why it’s safe
+## Principles
 
 - **Minimal scope:** the model only labels hyphen splits; everything else is rule-based.
 - **Deterministic edits:** changes are applied as small, position-based patches.
-- **Auditable:** includes a concise JSON audit and low-confidence flags.
 - **Structure preserved:** paragraph breaks remain untouched.
 
 ## Usage
@@ -67,15 +70,44 @@ node src/index.js input.txt -o output.txt
 # Without LLM (only applies keep-hyphens.txt rules and joins line breaks)
 node src/index.js --no-llm input.txt -o output.txt
 
+# With debug mode (writes LLM requests/responses to .debug/ folder)
+node src/index.js --debug input.txt -o output.txt
+node src/index.js --no-llm --debug input.txt -o output.txt
+
 # Pipe to stdout (legacy, may include library debug messages)
 node src/index.js input.txt > output.txt
 cat input.txt | node src/index.js > output.txt
 ```
 
-## You can configure
+## Configuration
 
-- **Confidence threshold** (default **0.7**).
-- **Keep-hyphen list** of known compounds in `keep-hyphens.txt`.
-- **Languages:** optimized for English and German.
-- **`--no-llm` flag:** Skip LLM processing entirely (no API key required).
-- **`--output FILE` or `-o FILE`:** Write to file directly (avoids library debug output in stdout).
+### Command-line Flags
+
+- **`--no-llm`:** Skip LLM processing entirely (no API key required)
+- **`--output FILE` or `-o FILE`:** Write to file directly (avoids library debug output in stdout)
+- **`--debug`:** Write LLM requests/responses to `.debug/` folder for inspection
+
+### Environment Variables
+
+- **`OPENAI_API_KEY`:** Your OpenAI API key (required unless `--no-llm` is used)
+- **`OPENAI_MODEL`:** Model to use (default: `gpt-4o-mini`)
+- **`CONFIDENCE_THRESHOLD`:** Minimum confidence for applying changes (default: `0.7`)
+- **`MAX_CANDIDATES_PER_CALL`:** Batch size for API calls (default: `20`)
+- **`WORD_CONTEXT_BEFORE`:** Context words before hyphen (default: `6`)
+- **`WORD_CONTEXT_AFTER`:** Context words after hyphen (default: `6`)
+
+### Files
+
+- **`keep-hyphens.txt`:** List of compound words to always preserve (case-insensitive, one per line)
+
+### Token Tracking & Cost
+
+When using LLM mode, the tool automatically tracks:
+
+- Prompt tokens
+- Completion tokens
+- Total tokens
+- Number of API requests
+- **Estimated cost in USD** based on current OpenAI pricing
+
+The cost summary is displayed at the end of processing.

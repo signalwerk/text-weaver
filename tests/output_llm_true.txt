@@ -1,0 +1,17 @@
+# Test Document for Text-Weaver
+
+## Simple Hyphen Splits
+
+This document tests various hyphenation scenarios.
+
+## Compound Words (Should use keep-hyphens.txt)
+
+The system uses state-of-theart Machine-Learning.
+
+## Mixed Scenarios
+
+The researchers developed know-how about time-series analysis and data processing methods.
+
+## Short Lines
+
+The system works perfectly with dedicated resources. 
