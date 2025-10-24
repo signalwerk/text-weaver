@@ -331,8 +331,6 @@ function buildPrompt(original, candidates) {
 
   // Minimal few-shot example (assistant shows JSON only)
   const exampleUser = {
-    original_text_excerpt:
-      "… Methoden den Kompe-\n tenzen …\nDas Protokoll ist Peer-to-\nPeer kompatibel …",
     candidates: [
       {
         id: "ex1",
@@ -375,7 +373,6 @@ function buildPrompt(original, candidates) {
   };
 
   const userPayload = {
-    original_text_excerpt: original,
     candidates: candidates.map((c) => ({
       id: c.id,
       type: c.type,
@@ -623,7 +620,7 @@ function joinSoftLinebreaksDefault(text) {
     let appliedAll = [...localKeep];
     let flagged = [];
 
-    if (!NO_LLM && llmCands.length) {
+    if ((!NO_LLM || DEBUG) && llmCands.length) {
       // Rebuild candidates on current 'working' text to get accurate spans
       const currentCands = buildHyphenCandidates(working);
 
@@ -640,35 +637,80 @@ function joinSoftLinebreaksDefault(text) {
         for (let i = 0; i < batches.length; i++) {
           const batch = batches[i];
           const { system, userPayload } = buildPrompt(working, batch);
-          const decisions = await callOpenAIChatJSON({
-            model: OPENAI_MODEL,
-            system,
-            userPayload,
-            batchNumber: i + 1,
-          });
+
+          // Write debug request file (in both LLM and no-LLM modes)
+          if (DEBUG) {
+            const requestPayload = {
+              model: OPENAI_MODEL,
+              temperature: 0,
+              response_format: { type: "json_object" },
+              messages: [
+                { role: "system", content: system },
+                { role: "user", content: userPayload },
+              ],
+            };
+            const suffix = NO_LLM ? "_noLLM" : "";
+            const requestFile = path.join(
+              DEBUG_DIR,
+              `request_batch_${i + 1}${suffix}.json`,
+            );
+            fs.writeFileSync(
+              requestFile,
+              JSON.stringify(requestPayload, null, 2),
+              "utf8",
+            );
+          }
+
+          // Only call API if not in NO_LLM mode
+          if (!NO_LLM) {
+            const decisions = await callOpenAIChatJSON({
+              model: OPENAI_MODEL,
+              system,
+              userPayload,
+              batchNumber: i + 1,
+            });
+            console.error(
+              JSON.stringify(
+                { batch: i + 1, totalBatches: batches.length, decisions },
+                null,
+                2,
+              ),
+            );
+            const {
+              text: newText,
+              applied,
+              low,
+            } = applyHyphenPatches(
+              working,
+              batch,
+              decisions,
+              CONFIDENCE_THRESHOLD,
+            );
+            working = newText;
+            appliedAll = appliedAll.concat(applied);
+            flagged = flagged.concat(low);
+          }
+        }
+
+        // Log debug file creation in NO_LLM mode
+        if (NO_LLM && DEBUG) {
           console.error(
-            JSON.stringify(
-              { batch: i + 1, totalBatches: batches.length, decisions },
-              null,
-              2,
-            ),
+            `✓ Debug: Wrote ${batches.length} request file(s) to ${DEBUG_DIR}/`,
           );
-          const {
-            text: newText,
-            applied,
-            low,
-          } = applyHyphenPatches(
-            working,
-            batch,
-            decisions,
-            CONFIDENCE_THRESHOLD,
+        }
+
+        // Log skipping in NO_LLM mode (without debug)
+        if (NO_LLM && !DEBUG && llmCands.length) {
+          console.error(
+            `Skipping ${llmCands.length} candidates (--no-llm mode)`,
           );
-          working = newText;
-          appliedAll = appliedAll.concat(applied);
-          flagged = flagged.concat(low);
         }
       }
-    } else if (NO_LLM && llmCands.length) {
+    }
+
+    // Handle case when NO_LLM is true, DEBUG is false, and we have candidates
+    // (didn't enter the above block because (!NO_LLM || DEBUG) was false)
+    if (NO_LLM && !DEBUG && llmCands.length) {
       console.error(`Skipping ${llmCands.length} candidates (--no-llm mode)`);
     }
 
