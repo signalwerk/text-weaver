@@ -208,8 +208,8 @@ function buildPrompt(original, candidates) {
           properties: {
             id: { type: "string" },
             decision: { enum: ["UNHYPHENATE", "KEEP_HYPHEN_JOIN"] },
-            // IMPORTANT: replacement applies to the *span only*
-            // UNHYPHENATE -> "" (delete "-<spaces>\n<spaces>")
+            // Span-only replacement:
+            // UNHYPHENATE -> "" (delete the span)
             // KEEP_HYPHEN_JOIN -> "-" (keep the hyphen, remove break+spaces)
             replacement: { type: "string" },
             confidence: { type: "number" },
@@ -223,12 +223,60 @@ function buildPrompt(original, candidates) {
     required: ["decisions"],
   };
 
-  const system = `You classify hyphenated line-end splits and return strict JSON.
-Do not edit outside candidate spans.
-Decisions:
-- UNHYPHENATE: remove trailing '-' + linebreak and join fragments (e.g., Kompe-\\ntenzen -> Kompetenzen).
-- KEEP_HYPHEN_JOIN: keep real hyphenated compound; remove only the linebreak (Peer-to-\\nPeer -> Peer-to-Peer).
-No changes to punctuation or spacing beyond the span. Return ONLY JSON.`;
+  const system = `You classify ONLY hyphen-at-line-end splits and return strict JSON.
+- Languages: German and English.
+- Never modify text outside the candidate span.
+- Decisions:
+  • UNHYPHENATE: remove trailing '-' + linebreak and join fragments (e.g., Kompe-\\ntenzen -> Kompetenzen).
+  • KEEP_HYPHEN_JOIN: keep real hyphenated compound; remove only the linebreak (Peer-to-\\nPeer -> Peer-to-Peer).
+- Do NOT normalize punctuation or spacing beyond the span.
+- Use high confidence when the choice is clear (e.g., dictionary/common compounds, keep list patterns).
+- Output MUST be valid JSON per schema; no extra text.`;
+
+  // Minimal few-shot example (assistant shows JSON only)
+  const exampleUser = {
+    original_text_excerpt:
+      "… Methoden den Kompe-\n tenzen …\nDas Protokoll ist Peer-to-\nPeer kompatibel …",
+    candidates: [
+      {
+        id: "ex1",
+        type: "HYPHEN_SPLIT",
+        span: { start: 19, end: 22 },
+        fragments: { left_line_end: "Kompe-", right_line_start: "tenzen" },
+        left_context: "Methoden den Kompe-",
+        right_context: "tenzen und der …",
+      },
+      {
+        id: "ex2",
+        type: "HYPHEN_SPLIT",
+        span: { start: 66, end: 70 },
+        fragments: { left_line_end: "Peer-to-", right_line_start: "Peer" },
+        left_context: "… ist Peer-to-",
+        right_context: "Peer kompatibel …",
+      },
+    ],
+    output_schema,
+    format: "Return ONLY valid JSON matching the schema. No extra text.",
+  };
+
+  const exampleAssistant = {
+    decisions: [
+      {
+        id: "ex1",
+        decision: "UNHYPHENATE",
+        replacement: "",
+        confidence: 0.97,
+        flag_review: false,
+      },
+      {
+        id: "ex2",
+        decision: "KEEP_HYPHEN_JOIN",
+        replacement: "-",
+        confidence: 0.98,
+        flag_review: false,
+      },
+    ],
+  };
 
   const userPayload = {
     original_text_excerpt: original,
@@ -244,7 +292,15 @@ No changes to punctuation or spacing beyond the span. Return ONLY JSON.`;
     format: "Return ONLY valid JSON matching the schema. No extra text.",
   };
 
-  return { system, userPayload };
+  return {
+    system,
+    // We include a single compact few-shot example to anchor behavior
+    fewshot: [
+      { role: "user", content: JSON.stringify(exampleUser) },
+      { role: "assistant", content: JSON.stringify(exampleAssistant) },
+    ],
+    userPayload,
+  };
 }
 
 async function callOpenAIChatJSON({ model, system, userPayload }) {
