@@ -5,3 +5,24 @@
 This document tests vari-
 ous hyphenation scenar-
 ios.
+
+## Compound Words (Should use keep-hyphens.txt)
+
+The system uses state-of-the-
+art Machine-Learning.
+
+## Mixed Scenarios
+
+The re-
+searchers developed know-
+how about time-series analy-
+sis and data process-
+ing methods.
+
+## Short Lines
+
+The sys-
+tem works per-
+fectly with dedi-
+cated re-
+sources.

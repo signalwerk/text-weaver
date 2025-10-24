@@ -176,6 +176,28 @@ function rightWordToken(text, pos) {
   return m ? m[0] : "";
 }
 
+// Extract full hyphenated compound going backwards from position (before the hyphen)
+// e.g., for "state-of-the-" at position of final hyphen, returns "state-of-the"
+function leftCompoundToken(text, pos) {
+  // Look backwards to capture: word-word-word pattern
+  let i = pos - 1;
+  let compound = "";
+  
+  // Go backwards collecting letters and hyphens
+  while (i >= 0) {
+    const ch = text[i];
+    if (/\p{L}/u.test(ch) || ch === "-") {
+      compound = ch + compound;
+      i--;
+    } else {
+      break;
+    }
+  }
+  
+  // Remove trailing hyphen if present
+  return compound.replace(/-$/, "");
+}
+
 // ---------- Candidate detection (hyphen + newline only) ----------
 /**
  * Detect hyphen-split candidates of the form:
@@ -204,14 +226,22 @@ function buildHyphenCandidates(text) {
 
     // Right token (first word after the split)
     const rightToken = rightWordToken(text, spanEnd);
+    
+    // Extract full left compound (including any existing hyphens)
+    // e.g., "state-of-the" for "state-of-the-\nart"
+    const leftCompound = leftCompoundToken(text, spanStart);
 
     // Word-based context windows
-    // Left context: words before the split word, then the split word with hyphen
-    const beforeLeft = wordContextBefore(text, idx, WORD_CONTEXT_BEFORE);
-    const left_context = (beforeLeft ? beforeLeft + " " : "") + leftWord + "-";
-    
+    // Left context: words before the compound, then the compound with hyphen
+    const beforeCompound = wordContextBefore(text, idx - (leftCompound.length - leftWord.length), WORD_CONTEXT_BEFORE);
+    const left_context = (beforeCompound ? beforeCompound + " " : "") + leftCompound + "-";
+
     // Right context: right token, then words after it
-    const afterRight = wordContextAfter(text, spanEnd + rightToken.length, WORD_CONTEXT_AFTER);
+    const afterRight = wordContextAfter(
+      text,
+      spanEnd + rightToken.length,
+      WORD_CONTEXT_AFTER,
+    );
     const right_context = rightToken + (afterRight ? " " + afterRight : "");
 
     cands.push({
@@ -219,9 +249,10 @@ function buildHyphenCandidates(text) {
       type: "HYPHEN_SPLIT",
       span: { start: spanStart, end: spanEnd },
       leftWord,
+      leftCompound, // Full compound for keep-hyphens matching
       rightToken,
       fragments: {
-        start: leftWord + "-",
+        start: leftCompound + "-",
         end: rightToken,
       },
       left_context,
@@ -390,8 +421,6 @@ const tokenStats = {
 const PRICING = {
   "gpt-4o-mini": { input: 0.15, output: 0.6 },
   "gpt-4o": { input: 2.5, output: 10.0 },
-  "gpt-4-turbo": { input: 10.0, output: 30.0 },
-  "gpt-3.5-turbo": { input: 0.5, output: 1.5 },
 };
 
 function calculateCost(model, promptTokens, completionTokens) {
@@ -566,7 +595,8 @@ function joinSoftLinebreaksDefault(text) {
     const localKeep = [];
     const llmCands = [];
     for (const c of hyphenCands) {
-      const compound = (c.leftWord + "-" + c.rightToken).toLowerCase();
+      // Use full compound (leftCompound includes any existing hyphens)
+      const compound = (c.leftCompound + "-" + c.rightToken).toLowerCase();
       if (c.rightToken && keepList.has(compound)) {
         // Keep hyphen and remove break: span replacement is "-"
         localKeep.push({

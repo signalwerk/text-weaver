@@ -7,7 +7,7 @@ rm -rf .debug
 node src/index.js --debug --no-llm ./tests/test.md --output ./tests/output_llm_false.txt
 
 # Run with LLM (requires OPENAI_API_KEY)
-# node src/index.js ./tests/test.md --output ./tests/output_llm_true.txt
+# node src/index.js --debug  ./tests/test.md --output ./tests/output_llm_true.txt
 
 # Run with debug mode (writes request/response to .debug/)
 # node src/index.js --debug ./tests/test.md --output ./tests/output_llm_true.txt

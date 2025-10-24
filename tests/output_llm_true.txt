@@ -6,7 +6,7 @@ This document tests various hyphenation scenarios.
 
 ## Compound Words (Should use keep-hyphens.txt)
 
-The system uses state-of-theart Machine-Learning.
+The system uses state-of-the-art Machine-Learning.
 
 ## Mixed Scenarios
 
