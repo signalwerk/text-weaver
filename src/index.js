@@ -518,11 +518,28 @@ function applyHyphenPatches(original, candidates, decisions, threshold) {
   const byId = new Map(decisions.map((d) => [d.id, d]));
   const patches = [];
   const low = [];
+  const warnings = [];
+
+  // Validate all candidates got responses
+  const missingResponses = [];
+  for (const cand of candidates) {
+    const d = byId.get(cand.id);
+    if (!d) {
+      missingResponses.push(cand.id);
+      warnings.push({
+        type: "missing_response",
+        id: cand.id,
+        message: `No LLM response for candidate ${cand.id}`,
+      });
+    }
+  }
 
   for (const cand of candidates) {
     const d = byId.get(cand.id);
     if (!d) continue;
+    
     if (typeof d.confidence !== "number") d.confidence = 0;
+    
     if (d.confidence < threshold) {
       d.flag_review = true;
       low.push({
@@ -530,8 +547,16 @@ function applyHyphenPatches(original, candidates, decisions, threshold) {
         decision: d.decision,
         confidence: d.confidence,
       });
+      warnings.push({
+        type: "low_confidence",
+        id: d.id,
+        decision: d.decision,
+        confidence: d.confidence,
+        message: `Low confidence (${d.confidence.toFixed(2)}) for ${cand.id}, skipping patch`,
+      });
       continue;
     }
+    
     if (d.decision === "UNHYPHENATE" || d.decision === "KEEP_HYPHEN_JOIN") {
       patches.push({
         id: d.id,
@@ -541,33 +566,64 @@ function applyHyphenPatches(original, candidates, decisions, threshold) {
         decision: d.decision,
         confidence: d.confidence,
       });
+    } else {
+      warnings.push({
+        type: "invalid_decision",
+        id: d.id,
+        decision: d.decision,
+        message: `Invalid decision "${d.decision}" for ${cand.id}`,
+      });
     }
   }
 
   patches.sort((a, b) => a.start - b.start);
+  
+  // Detect overlapping patches
   const nonOverlapping = [];
+  const overlapping = [];
   let lastEnd = -1;
   for (const p of patches) {
     if (p.start >= lastEnd) {
       nonOverlapping.push(p);
       lastEnd = p.end;
+    } else {
+      overlapping.push(p.id);
+      warnings.push({
+        type: "overlapping_patch",
+        id: p.id,
+        message: `Patch ${p.id} overlaps with previous patch, skipping`,
+      });
     }
   }
 
   let text = original;
   let offset = 0;
   const applied = [];
+  const failedSanity = [];
+  
   for (const p of nonOverlapping) {
     const realStart = p.start + offset;
     const realEnd = p.end + offset;
     const slice = text.slice(realStart, realEnd);
+    
     // sanity check: expect newline within slice
-    if (!slice.includes("\n")) continue;
+    if (!slice.includes("\n")) {
+      failedSanity.push(p.id);
+      warnings.push({
+        type: "sanity_check_failed",
+        id: p.id,
+        slice_preview: JSON.stringify(slice),
+        message: `Sanity check failed for ${p.id}: no newline in span (offset may have shifted)`,
+      });
+      continue;
+    }
+    
     text = text.slice(0, realStart) + p.replacement + text.slice(realEnd);
     offset += p.replacement.length - (realEnd - realStart);
     applied.push(p);
   }
-  return { text, applied, low };
+  
+  return { text, applied, low, warnings, missingResponses, overlapping, failedSanity };
 }
 
 /**
@@ -628,6 +684,7 @@ function joinSoftLinebreaksDefault(text) {
     // 4) Send remaining candidates to LLM (if any and if not NO_LLM), batched
     let appliedAll = [...localKeep];
     let flagged = [];
+    let allWarnings = [];
 
     if ((!NO_LLM || DEBUG) && llmCands.length) {
       // Rebuild candidates on current 'working' text to get accurate spans
@@ -689,6 +746,10 @@ function joinSoftLinebreaksDefault(text) {
               text: newText,
               applied,
               low,
+              warnings,
+              missingResponses,
+              overlapping,
+              failedSanity,
             } = applyHyphenPatches(
               working,
               batch,
@@ -698,6 +759,15 @@ function joinSoftLinebreaksDefault(text) {
             working = newText;
             appliedAll = appliedAll.concat(applied);
             flagged = flagged.concat(low);
+            allWarnings = allWarnings.concat(warnings);
+            
+            // Log warnings for this batch
+            if (warnings.length > 0) {
+              console.error(`\n⚠️  Batch ${i + 1} Warnings:`);
+              for (const w of warnings) {
+                console.error(`  - [${w.type}] ${w.message}`);
+              }
+            }
           }
         }
 
@@ -754,11 +824,21 @@ function joinSoftLinebreaksDefault(text) {
       };
     }
 
+    // Add warnings summary
+    if (allWarnings.length > 0) {
+      const warningsByType = {};
+      for (const w of allWarnings) {
+        warningsByType[w.type] = (warningsByType[w.type] || 0) + 1;
+      }
+      summary.warnings = warningsByType;
+    }
+
     console.error(
       JSON.stringify(
         {
           summary,
           flagged,
+          warnings: allWarnings.length > 0 ? allWarnings : undefined,
         },
         null,
         2,
@@ -782,6 +862,28 @@ function joinSoftLinebreaksDefault(text) {
         `Total Tokens:       ${tokenStats.total_tokens.toLocaleString()}`,
       );
       console.error(`Estimated Cost:     $${totalCost.toFixed(6)} USD`);
+      console.error("=".repeat(60) + "\n");
+    }
+    
+    // Display warnings summary if any
+    if (allWarnings.length > 0) {
+      console.error("\n" + "=".repeat(60));
+      console.error("⚠️  WARNINGS SUMMARY");
+      console.error("=".repeat(60));
+      const warningsByType = {};
+      for (const w of allWarnings) {
+        warningsByType[w.type] = (warningsByType[w.type] || []);
+        warningsByType[w.type].push(w);
+      }
+      for (const [type, warnings] of Object.entries(warningsByType)) {
+        console.error(`\n${type.toUpperCase().replace(/_/g, " ")} (${warnings.length}):`);
+        for (const w of warnings.slice(0, 5)) { // Show first 5 of each type
+          console.error(`  • ${w.id}: ${w.message}`);
+        }
+        if (warnings.length > 5) {
+          console.error(`  ... and ${warnings.length - 5} more`);
+        }
+      }
       console.error("=".repeat(60) + "\n");
     }
 
