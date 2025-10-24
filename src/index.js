@@ -17,6 +17,7 @@
  * Flags:
  *   --no-llm           Skip LLM processing; only apply keep-hyphens.txt rules
  *   --output, -o FILE  Write output to FILE instead of stdout
+ *   --debug            Write LLM requests/responses to .debug/ folder
  *
  * Env (.env supported):
  *   OPENAI_API_KEY=sk-...   (required unless --no-llm is used)
@@ -37,23 +38,33 @@ dotenv.config();
 // ---------- Parse CLI arguments ----------
 const args = process.argv.slice(2);
 const NO_LLM = args.includes("--no-llm");
+const DEBUG = args.includes("--debug");
 
 // Find output file (--output <file> or -o <file>)
 let outputPath = null;
-const outputFlagIndex = args.findIndex((arg) => arg === "--output" || arg === "-o");
+const outputFlagIndex = args.findIndex(
+  (arg) => arg === "--output" || arg === "-o",
+);
 if (outputFlagIndex !== -1 && args[outputFlagIndex + 1]) {
   outputPath = args[outputFlagIndex + 1];
 }
 
 // Find input file (non-flag argument that isn't the output path)
-const inputPath = args.find(
-  (arg, idx) => 
-    !arg.startsWith("--") && 
-    !arg.startsWith("-") && 
-    arg !== outputPath &&
-    args[idx - 1] !== "--output" &&
-    args[idx - 1] !== "-o"
-) || null;
+const inputPath =
+  args.find(
+    (arg, idx) =>
+      !arg.startsWith("--") &&
+      !arg.startsWith("-") &&
+      arg !== outputPath &&
+      args[idx - 1] !== "--output" &&
+      args[idx - 1] !== "-o",
+  ) || null;
+
+// Debug directory
+const DEBUG_DIR = path.resolve(process.cwd(), ".debug");
+if (DEBUG && !fs.existsSync(DEBUG_DIR)) {
+  fs.mkdirSync(DEBUG_DIR, { recursive: true });
+}
 
 // ---------- Config ----------
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -249,12 +260,15 @@ function sanitizeAndParseLLMResponse(content) {
     // Find the first {...} or [...] block
     const jsonMatch = withoutFences.match(/(\{|\[)[\s\S]*(\}|\])/m);
     if (!jsonMatch) return null;
-    
+
     let jsonString = jsonMatch[0];
 
     // Repair illegal backslash escapes (keep valid ones: \", \\, \/, \b, \f, \n, \r, \t, \uXXXX)
     // Match backslash NOT followed by valid escape char or \u followed by 4 hex digits
-    jsonString = jsonString.replace(/\\(?!(["\\\/bfnrt]|u[0-9a-fA-F]{4}))/g, "\\\\");
+    jsonString = jsonString.replace(
+      /\\(?!(["\\\/bfnrt]|u[0-9a-fA-F]{4}))/g,
+      "\\\\",
+    );
 
     // Parse and return null on failure
     try {
@@ -385,22 +399,47 @@ function buildPrompt(original, candidates) {
   };
 }
 
-async function callOpenAIChatJSON({ model, system, userPayload }) {
+// Token tracking and cost calculation
+const tokenStats = {
+  prompt_tokens: 0,
+  completion_tokens: 0,
+  total_tokens: 0,
+  requests: 0,
+};
+
+// Pricing per 1M tokens (as of 2025)
+const PRICING = {
+  "gpt-4o-mini": { input: 0.15, output: 0.6 },
+  "gpt-4o": { input: 2.5, output: 10.0 },
+  "gpt-4-turbo": { input: 10.0, output: 30.0 },
+  "gpt-3.5-turbo": { input: 0.5, output: 1.5 },
+};
+
+function calculateCost(model, promptTokens, completionTokens) {
+  const pricing = PRICING[model] || PRICING["gpt-4o-mini"];
+  const inputCost = (promptTokens / 1_000_000) * pricing.input;
+  const outputCost = (completionTokens / 1_000_000) * pricing.output;
+  return inputCost + outputCost;
+}
+
+async function callOpenAIChatJSON({ model, system, userPayload, batchNumber }) {
+  const requestPayload = {
+    model,
+    temperature: 0,
+    response_format: { type: "json_object" },
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: JSON.stringify(userPayload) },
+    ],
+  };
+
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${OPENAI_API_KEY}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      model,
-      temperature: 0,
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: JSON.stringify(userPayload) },
-      ],
-    }),
+    body: JSON.stringify(requestPayload),
   });
 
   if (!res.ok) {
@@ -408,31 +447,61 @@ async function callOpenAIChatJSON({ model, system, userPayload }) {
     throw new Error(`OpenAI API error ${res.status}: ${txt || res.statusText}`);
   }
   const data = await res.json();
+
+  // Track tokens
+  if (data.usage) {
+    tokenStats.prompt_tokens += data.usage.prompt_tokens || 0;
+    tokenStats.completion_tokens += data.usage.completion_tokens || 0;
+    tokenStats.total_tokens += data.usage.total_tokens || 0;
+    tokenStats.requests += 1;
+  }
+
+  // Write debug response file
+  if (DEBUG) {
+    const responseFile = path.join(
+      DEBUG_DIR,
+      `response_batch_${batchNumber}.json`,
+    );
+    fs.writeFileSync(responseFile, JSON.stringify(data, null, 2), "utf8");
+  }
+
   const content = data?.choices?.[0]?.message?.content || "";
-  
+
   // Use sanitization to handle malformed responses
   const parsed = sanitizeAndParseLLMResponse(content);
-  
+
   if (!parsed) {
-    throw new Error("Model did not return valid JSON. Content: " + content.substring(0, 200));
+    throw new Error(
+      "Model did not return valid JSON. Content: " + content.substring(0, 200),
+    );
   }
   if (!Array.isArray(parsed.decisions)) {
-    throw new Error("JSON missing 'decisions' array. Got keys: " + Object.keys(parsed).join(", "));
+    throw new Error(
+      "JSON missing 'decisions' array. Got keys: " +
+        Object.keys(parsed).join(", "),
+    );
   }
-  
+
   // Validate that each decision has required fields
   for (const decision of parsed.decisions) {
     if (!decision.id || typeof decision.id !== "string") {
-      throw new Error(`Decision missing valid 'id' field: ${JSON.stringify(decision)}`);
+      throw new Error(
+        `Decision missing valid 'id' field: ${JSON.stringify(decision)}`,
+      );
     }
-    if (!decision.decision || !["UNHYPHENATE", "KEEP_HYPHEN_JOIN"].includes(decision.decision)) {
-      throw new Error(`Decision '${decision.id}' has invalid 'decision' field: ${decision.decision}`);
+    if (
+      !decision.decision ||
+      !["UNHYPHENATE", "KEEP_HYPHEN_JOIN"].includes(decision.decision)
+    ) {
+      throw new Error(
+        `Decision '${decision.id}' has invalid 'decision' field: ${decision.decision}`,
+      );
     }
     if (decision.replacement === undefined) {
       throw new Error(`Decision '${decision.id}' missing 'replacement' field`);
     }
   }
-  
+
   return parsed.decisions;
 }
 
@@ -553,13 +622,15 @@ function joinSoftLinebreaksDefault(text) {
     // 4) Send remaining candidates to LLM (if any and if not NO_LLM), batched
     let appliedAll = [...localKeep];
     let flagged = [];
-    
+
     if (!NO_LLM && llmCands.length) {
       // Rebuild candidates on current 'working' text to get accurate spans
       const currentCands = buildHyphenCandidates(working);
-      
+
       if (currentCands.length === 0) {
-        console.error("Warning: No candidates found after applying keep-rules. Skipping LLM.");
+        console.error(
+          "Warning: No candidates found after applying keep-rules. Skipping LLM.",
+        );
       } else {
         const batches = [];
         for (let i = 0; i < currentCands.length; i += MAX_CANDIDATES_PER_CALL) {
@@ -573,6 +644,7 @@ function joinSoftLinebreaksDefault(text) {
             model: OPENAI_MODEL,
             system,
             userPayload,
+            batchNumber: i + 1,
           });
           console.error(
             JSON.stringify(
@@ -585,7 +657,12 @@ function joinSoftLinebreaksDefault(text) {
             text: newText,
             applied,
             low,
-          } = applyHyphenPatches(working, batch, decisions, CONFIDENCE_THRESHOLD);
+          } = applyHyphenPatches(
+            working,
+            batch,
+            decisions,
+            CONFIDENCE_THRESHOLD,
+          );
           working = newText;
           appliedAll = appliedAll.concat(applied);
           flagged = flagged.concat(low);
@@ -598,25 +675,64 @@ function joinSoftLinebreaksDefault(text) {
     // 5) Default join of remaining single linebreaks
     const finalText = joinSoftLinebreaksDefault(working);
 
-    // 6) Audit
+    // 6) Audit with token stats
+    const totalCost = calculateCost(
+      OPENAI_MODEL,
+      tokenStats.prompt_tokens,
+      tokenStats.completion_tokens,
+    );
+
+    const summary = {
+      mode: NO_LLM ? "no-llm" : "llm",
+      hyphen_candidates_total: hyphenCands.length,
+      applied_keep_rules: localKeep.length,
+      applied_model_patches: appliedAll.length - localKeep.length,
+      flagged_low_confidence: flagged.length,
+      default_join_with_space_applied: finalText !== working,
+      skipped_llm_candidates: NO_LLM ? llmCands.length : 0,
+    };
+
+    if (!NO_LLM && tokenStats.requests > 0) {
+      summary.token_usage = {
+        prompt_tokens: tokenStats.prompt_tokens,
+        completion_tokens: tokenStats.completion_tokens,
+        total_tokens: tokenStats.total_tokens,
+        requests: tokenStats.requests,
+        model: OPENAI_MODEL,
+        estimated_cost_usd: parseFloat(totalCost.toFixed(6)),
+      };
+    }
+
     console.error(
       JSON.stringify(
         {
-          summary: {
-            mode: NO_LLM ? "no-llm" : "llm",
-            hyphen_candidates_total: hyphenCands.length,
-            applied_keep_rules: localKeep.length,
-            applied_model_patches: appliedAll.length - localKeep.length,
-            flagged_low_confidence: flagged.length,
-            default_join_with_space_applied: finalText !== working,
-            skipped_llm_candidates: NO_LLM ? llmCands.length : 0,
-          },
+          summary,
           flagged,
         },
         null,
         2,
       ),
     );
+
+    // Display token summary in a friendly format
+    if (!NO_LLM && tokenStats.requests > 0) {
+      console.error("\n" + "=".repeat(60));
+      console.error("📊 TOKEN USAGE & COST SUMMARY");
+      console.error("=".repeat(60));
+      console.error(`Model:              ${OPENAI_MODEL}`);
+      console.error(`API Requests:       ${tokenStats.requests}`);
+      console.error(
+        `Prompt Tokens:      ${tokenStats.prompt_tokens.toLocaleString()}`,
+      );
+      console.error(
+        `Completion Tokens:  ${tokenStats.completion_tokens.toLocaleString()}`,
+      );
+      console.error(
+        `Total Tokens:       ${tokenStats.total_tokens.toLocaleString()}`,
+      );
+      console.error(`Estimated Cost:     $${totalCost.toFixed(6)} USD`);
+      console.error("=".repeat(60) + "\n");
+    }
 
     // Write output to file or stdout
     if (outputPath) {
