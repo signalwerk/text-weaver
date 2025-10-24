@@ -6,3 +6,4 @@ Time-series
 State-of-the-art
 Know-how
 Up-to-date
+Soll-Zustand

@@ -8,12 +8,18 @@
  * - keep-hyphens.txt = rule list to always KEEP hyphen and join (skip LLM).
  *
  * Usage:
- *   node ocr-unwrap.js input.txt > output.txt
- *   # or:
- *   cat input.txt | node ocr-unwrap.js > output.txt
+ *   node src/index.js input.txt --output output.txt
+ *   node src/index.js --no-llm input.txt -o output.txt  # Skip LLM, use rules only
+ *   # or pipe (legacy, but may include debug output from libraries):
+ *   node src/index.js input.txt > output.txt
+ *   cat input.txt | node src/index.js > output.txt
+ *
+ * Flags:
+ *   --no-llm           Skip LLM processing; only apply keep-hyphens.txt rules
+ *   --output, -o FILE  Write output to FILE instead of stdout
  *
  * Env (.env supported):
- *   OPENAI_API_KEY=sk-...
+ *   OPENAI_API_KEY=sk-...   (required unless --no-llm is used)
  *   OPENAI_MODEL=gpt-4o-mini
  *   MAX_CANDIDATES_PER_CALL=300
  *   CONFIDENCE_THRESHOLD=0.7
@@ -28,10 +34,32 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
+// ---------- Parse CLI arguments ----------
+const args = process.argv.slice(2);
+const NO_LLM = args.includes("--no-llm");
+
+// Find output file (--output <file> or -o <file>)
+let outputPath = null;
+const outputFlagIndex = args.findIndex((arg) => arg === "--output" || arg === "-o");
+if (outputFlagIndex !== -1 && args[outputFlagIndex + 1]) {
+  outputPath = args[outputFlagIndex + 1];
+}
+
+// Find input file (non-flag argument that isn't the output path)
+const inputPath = args.find(
+  (arg, idx) => 
+    !arg.startsWith("--") && 
+    !arg.startsWith("-") && 
+    arg !== outputPath &&
+    args[idx - 1] !== "--output" &&
+    args[idx - 1] !== "-o"
+) || null;
+
 // ---------- Config ----------
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-if (!OPENAI_API_KEY) {
+if (!NO_LLM && !OPENAI_API_KEY) {
   console.error("ERROR: Missing OPENAI_API_KEY in environment.");
+  console.error("Use --no-llm flag to skip LLM processing.");
   process.exit(1);
 }
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
@@ -196,6 +224,60 @@ function buildHyphenCandidates(text) {
   return cands;
 }
 
+// ---------- LLM Response Sanitization ----------
+/**
+ * Sanitize and parse LLM response that may contain:
+ * - JSON wrapped in Markdown fences (```json ... ```)
+ * - Illegal backslash escapes (\Z → \\Z)
+ * - Extra prose before/after the JSON
+ * - Malformed JSON structures
+ *
+ * Returns the parsed object or null if parsing fails.
+ */
+function sanitizeAndParseLLMResponse(content) {
+  if (typeof content !== "string" || !content.trim()) {
+    return null;
+  }
+
+  // Helper to strip fences, find JSON, repair escapes, and parse
+  function tryParse(str) {
+    // Remove leading ```json (or ```lang) and trailing ```
+    const withoutFences = str
+      .replace(/^\s*```[^\n]*\n?/i, "") // opening fence
+      .replace(/\n?```\s*$/, ""); // closing fence
+
+    // Find the first {...} or [...] block
+    const jsonMatch = withoutFences.match(/(\{|\[)[\s\S]*(\}|\])/m);
+    if (!jsonMatch) return null;
+    
+    let jsonString = jsonMatch[0];
+
+    // Repair illegal backslash escapes (keep valid ones: \", \\, \/, \b, \f, \n, \r, \t, \uXXXX)
+    // Match backslash NOT followed by valid escape char or \u followed by 4 hex digits
+    jsonString = jsonString.replace(/\\(?!(["\\\/bfnrt]|u[0-9a-fA-F]{4}))/g, "\\\\");
+
+    // Parse and return null on failure
+    try {
+      return JSON.parse(jsonString);
+    } catch {
+      return null;
+    }
+  }
+
+  // First attempt: parse the whole content
+  let data = tryParse(content);
+
+  // Second attempt: if failed, cut everything before the first fence and retry
+  if (!data) {
+    const fenceIdx = content.indexOf("```");
+    if (fenceIdx !== -1) {
+      data = tryParse(content.slice(fenceIdx));
+    }
+  }
+
+  return data;
+}
+
 // ---------- OpenAI ----------
 function buildPrompt(original, candidates) {
   const output_schema = {
@@ -326,16 +408,31 @@ async function callOpenAIChatJSON({ model, system, userPayload }) {
     throw new Error(`OpenAI API error ${res.status}: ${txt || res.statusText}`);
   }
   const data = await res.json();
-  const content = data?.choices?.[0]?.message?.content || "{}";
-  let parsed;
-  try {
-    parsed = JSON.parse(content);
-  } catch (e) {
-    throw new Error("Model did not return valid JSON.");
+  const content = data?.choices?.[0]?.message?.content || "";
+  
+  // Use sanitization to handle malformed responses
+  const parsed = sanitizeAndParseLLMResponse(content);
+  
+  if (!parsed) {
+    throw new Error("Model did not return valid JSON. Content: " + content.substring(0, 200));
   }
-  if (!parsed || !Array.isArray(parsed.decisions)) {
-    throw new Error("JSON missing 'decisions' array.");
+  if (!Array.isArray(parsed.decisions)) {
+    throw new Error("JSON missing 'decisions' array. Got keys: " + Object.keys(parsed).join(", "));
   }
+  
+  // Validate that each decision has required fields
+  for (const decision of parsed.decisions) {
+    if (!decision.id || typeof decision.id !== "string") {
+      throw new Error(`Decision missing valid 'id' field: ${JSON.stringify(decision)}`);
+    }
+    if (!decision.decision || !["UNHYPHENATE", "KEEP_HYPHEN_JOIN"].includes(decision.decision)) {
+      throw new Error(`Decision '${decision.id}' has invalid 'decision' field: ${decision.decision}`);
+    }
+    if (decision.replacement === undefined) {
+      throw new Error(`Decision '${decision.id}' missing 'replacement' field`);
+    }
+  }
+  
   return parsed.decisions;
 }
 
@@ -413,8 +510,6 @@ function joinSoftLinebreaksDefault(text) {
 // ---------- Main ----------
 (async function main() {
   try {
-    const inputPath =
-      process.argv[2] && process.argv[2] !== "-" ? process.argv[2] : null;
     const original = await readAllText(inputPath);
 
     // 1) Detect hyphen candidates
@@ -455,46 +550,49 @@ function joinSoftLinebreaksDefault(text) {
       }
     }
 
-    // 4) Send remaining candidates to LLM (if any), batched
+    // 4) Send remaining candidates to LLM (if any and if not NO_LLM), batched
     let appliedAll = [...localKeep];
     let flagged = [];
-    if (llmCands.length) {
-      // Re-map spans for working text? Spans still valid because local patches did not
-      // modify candidate indices for llmCands (they were chosen from the original list).
-      // To be safe, rebuild candidates on current 'working' limited to these ids.
-      const currentCands = buildHyphenCandidates(working).filter((nc) =>
-        llmCands.some((c) => c.id === nc.id),
-      );
+    
+    if (!NO_LLM && llmCands.length) {
+      // Rebuild candidates on current 'working' text to get accurate spans
+      const currentCands = buildHyphenCandidates(working);
+      
+      if (currentCands.length === 0) {
+        console.error("Warning: No candidates found after applying keep-rules. Skipping LLM.");
+      } else {
+        const batches = [];
+        for (let i = 0; i < currentCands.length; i += MAX_CANDIDATES_PER_CALL) {
+          batches.push(currentCands.slice(i, i + MAX_CANDIDATES_PER_CALL));
+        }
 
-      const batches = [];
-      for (let i = 0; i < currentCands.length; i += MAX_CANDIDATES_PER_CALL) {
-        batches.push(currentCands.slice(i, i + MAX_CANDIDATES_PER_CALL));
+        for (let i = 0; i < batches.length; i++) {
+          const batch = batches[i];
+          const { system, userPayload } = buildPrompt(working, batch);
+          const decisions = await callOpenAIChatJSON({
+            model: OPENAI_MODEL,
+            system,
+            userPayload,
+          });
+          console.error(
+            JSON.stringify(
+              { batch: i + 1, totalBatches: batches.length, decisions },
+              null,
+              2,
+            ),
+          );
+          const {
+            text: newText,
+            applied,
+            low,
+          } = applyHyphenPatches(working, batch, decisions, CONFIDENCE_THRESHOLD);
+          working = newText;
+          appliedAll = appliedAll.concat(applied);
+          flagged = flagged.concat(low);
+        }
       }
-
-      for (let i = 0; i < batches.length; i++) {
-        const batch = batches[i];
-        const { system, userPayload } = buildPrompt(working, batch);
-        const decisions = await callOpenAIChatJSON({
-          model: OPENAI_MODEL,
-          system,
-          userPayload,
-        });
-        console.error(
-          JSON.stringify(
-            { batch: i + 1, totalBatches: batches.length, decisions },
-            null,
-            2,
-          ),
-        );
-        const {
-          text: newText,
-          applied,
-          low,
-        } = applyHyphenPatches(working, batch, decisions, CONFIDENCE_THRESHOLD);
-        working = newText;
-        appliedAll = appliedAll.concat(applied);
-        flagged = flagged.concat(low);
-      }
+    } else if (NO_LLM && llmCands.length) {
+      console.error(`Skipping ${llmCands.length} candidates (--no-llm mode)`);
     }
 
     // 5) Default join of remaining single linebreaks
@@ -505,11 +603,13 @@ function joinSoftLinebreaksDefault(text) {
       JSON.stringify(
         {
           summary: {
+            mode: NO_LLM ? "no-llm" : "llm",
             hyphen_candidates_total: hyphenCands.length,
             applied_keep_rules: localKeep.length,
             applied_model_patches: appliedAll.length - localKeep.length,
             flagged_low_confidence: flagged.length,
             default_join_with_space_applied: finalText !== working,
+            skipped_llm_candidates: NO_LLM ? llmCands.length : 0,
           },
           flagged,
         },
@@ -518,7 +618,13 @@ function joinSoftLinebreaksDefault(text) {
       ),
     );
 
-    process.stdout.write(finalText);
+    // Write output to file or stdout
+    if (outputPath) {
+      fs.writeFileSync(outputPath, finalText, "utf8");
+      console.error(`✓ Output written to: ${outputPath}`);
+    } else {
+      process.stdout.write(finalText);
+    }
   } catch (err) {
     console.error("ERROR:", err?.message || String(err));
     process.exit(1);
