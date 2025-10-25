@@ -13,7 +13,8 @@ art Machine-Learning.
 
 ## Clear cases
 
-This is a Time-Series.
+This is a Time-
+Series.
 
 This is A/
 B-Testing.

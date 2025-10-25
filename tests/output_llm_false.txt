@@ -14,7 +14,7 @@ The system uses state-of-the-art Machine-Learning.
 
 This is a Time-Series.
 
-This is A/ B-Testing.
+This is A/B-Testing.
 
 ## Mixed Scenarios
 

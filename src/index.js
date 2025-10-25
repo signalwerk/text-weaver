@@ -176,17 +176,18 @@ function rightWordToken(text, pos) {
   return m ? m[0] : "";
 }
 
-// Extract full hyphenated compound going backwards from position (before the hyphen)
+// Extract full compound going backwards from position (before the separator)
 // e.g., for "state-of-the-" at position of final hyphen, returns "state-of-the"
+// e.g., for "A/" at position of slash, returns "A"
 function leftCompoundToken(text, pos) {
-  // Look backwards to capture: word-word-word pattern
+  // Look backwards to capture: word-word-word or word/word pattern
   let i = pos - 1;
   let compound = "";
   
-  // Go backwards collecting letters and hyphens
+  // Go backwards collecting letters, hyphens, and slashes
   while (i >= 0) {
     const ch = text[i];
-    if (/\p{L}/u.test(ch) || ch === "-") {
+    if (/\p{L}/u.test(ch) || ch === "-" || ch === "/") {
       compound = ch + compound;
       i--;
     } else {
@@ -194,47 +195,66 @@ function leftCompoundToken(text, pos) {
     }
   }
   
-  // Remove trailing hyphen if present
-  return compound.replace(/-$/, "");
+  // Remove trailing separator if present
+  return compound.replace(/[-\/]$/, "");
 }
 
-// ---------- Candidate detection (hyphen + newline only) ----------
+// ---------- Candidate detection (hyphen/slash + newline) ----------
 /**
- * Detect hyphen-split candidates of the form:
- *   <letters>- [spaces] \n [spaces] <non-space>
+ * Detect split candidates of the form:
+ *   <letters>- [spaces] \n [spaces] <non-space>  (hyphen split)
+ *   <letters>/ [spaces] \n [spaces] <non-space>  (slash split)
  *
- * Span covers "-<spaces>\n<spaces>" up to just before the first non-space char.
+ * Span covers "[-/]<spaces>\n<spaces>" up to just before the first non-space char.
  * Leading/trailing spaces on either line won't break detection.
  */
 function buildHyphenCandidates(text) {
   const cands = [];
-  const re = /(\p{L}+)-[ \t]*\n[ \t]*([^\s])/gu;
+  // Match both hyphen and slash at end of line
+  const re = /(\p{L}+)([-\/])[ \t]*\n[ \t]*([^\s])/gu;
 
   for (const match of text.matchAll(re)) {
     const full = match[0];
     const leftWord = match[1];
+    const separator = match[2]; // "-" or "/"
     const idx = match.index;
 
-    // Compute span: start at hyphen, end right before first non-space char after newline
-    const afterLeft = full.slice(leftWord.length); // starts with '-'
-    const m2 = afterLeft.match(/^-\s*\n\s*/);
+    // Compute span: start at separator, end right before first non-space char after newline
+    const afterLeft = full.slice(leftWord.length); // starts with '-' or '/'
+    const m2 = afterLeft.match(/^[-\/]\s*\n\s*/);
     if (!m2) continue;
-    const hyphenBlockLen = m2[0].length;
+    const separatorBlockLen = m2[0].length;
 
     const spanStart = idx + leftWord.length;
-    const spanEnd = spanStart + hyphenBlockLen;
+    const spanEnd = spanStart + separatorBlockLen;
 
     // Right token (first word after the split)
     const rightToken = rightWordToken(text, spanEnd);
     
-    // Extract full left compound (including any existing hyphens)
-    // e.g., "state-of-the" for "state-of-the-\nart"
+    // Extract full left compound (including any existing hyphens/slashes)
+    // e.g., "state-of-the" for "state-of-the-\nart" or "A" for "A/\nB"
     const leftCompound = leftCompoundToken(text, spanStart);
 
+    // Determine if this is a special case that should auto-keep the separator
+    let autoKeep = false;
+    let autoReason = "";
+    
+    // Rule 1: Slash at end of line → always keep (e.g., A/B-Testing)
+    if (separator === "/") {
+      autoKeep = true;
+      autoReason = "slash";
+    }
+    
+    // Rule 2: Hyphen followed by uppercase letter → likely compound (e.g., Time-Series)
+    if (separator === "-" && rightToken && /^\p{Lu}/u.test(rightToken)) {
+      autoKeep = true;
+      autoReason = "hyphen-uppercase";
+    }
+
     // Word-based context windows
-    // Left context: words before the compound, then the compound with hyphen
+    // Left context: words before the compound, then the compound with separator
     const beforeCompound = wordContextBefore(text, idx - (leftCompound.length - leftWord.length), WORD_CONTEXT_BEFORE);
-    const left_context = (beforeCompound ? beforeCompound + " " : "") + leftCompound + "-";
+    const left_context = (beforeCompound ? beforeCompound + " " : "") + leftCompound + separator;
 
     // Right context: right token, then words after it
     const afterRight = wordContextAfter(
@@ -246,13 +266,16 @@ function buildHyphenCandidates(text) {
 
     cands.push({
       id: `h_${cands.length + 1}`,
-      type: "HYPHEN_SPLIT",
+      type: separator === "/" ? "SLASH_SPLIT" : "HYPHEN_SPLIT",
       span: { start: spanStart, end: spanEnd },
       leftWord,
       leftCompound, // Full compound for keep-hyphens matching
       rightToken,
+      separator,
+      autoKeep,
+      autoReason,
       fragments: {
-        start: leftCompound + "-",
+        start: leftCompound + separator,
         end: rightToken,
       },
       left_context,
@@ -636,11 +659,11 @@ function applyHyphenPatches(original, candidates, decisions, threshold) {
 /**
  * Join remaining single linebreaks with a single space (paragraphs preserved).
  * - Handles stray spaces around the newline.
- * - Does NOT join when the char immediately before newline is a hyphen (left for review).
+ * - Does NOT join when the char immediately before newline is a hyphen or slash (left for review).
  */
 function joinSoftLinebreaksDefault(text) {
   return text.replace(/([^\n])[\t ]*\n(?!\n)[\t ]*/g, (m, prev) => {
-    if (prev === "-") return m; // keep as-is after hyphen
+    if (prev === "-" || prev === "/") return m; // keep as-is after hyphen or slash
     return prev + " ";
   });
 }
@@ -653,22 +676,39 @@ function joinSoftLinebreaksDefault(text) {
     // 1) Detect hyphen candidates
     const hyphenCands = buildHyphenCandidates(original);
 
-    // 2) Apply keep-hyphens.txt decisions locally (case-insensitive)
+    // 2) Apply algorithmic rules and keep-hyphens.txt decisions locally
     const keepList = loadKeepHyphenList();
     const localKeep = [];
     const llmCands = [];
     for (const c of hyphenCands) {
-      // Use full compound (leftCompound includes any existing hyphens)
-      const compound = (c.leftCompound + "-" + c.rightToken).toLowerCase();
-      if (c.rightToken && keepList.has(compound)) {
-        // Keep hyphen and remove break: span replacement is "-"
+      let shouldKeep = false;
+      let reason = "";
+      
+      // Check algorithmic rules first (slash, hyphen+uppercase)
+      if (c.autoKeep) {
+        shouldKeep = true;
+        reason = c.autoReason;
+      }
+      
+      // Check keep-hyphens.txt list (only for hyphen splits)
+      if (!shouldKeep && c.separator === "-") {
+        const compound = (c.leftCompound + "-" + c.rightToken).toLowerCase();
+        if (c.rightToken && keepList.has(compound)) {
+          shouldKeep = true;
+          reason = "keep-list";
+        }
+      }
+      
+      if (shouldKeep) {
+        // Keep separator and remove break
         localKeep.push({
           id: c.id,
           start: c.span.start,
           end: c.span.end,
-          replacement: "-",
-          decision: "KEEP_HYPHEN_JOIN",
+          replacement: c.separator,
+          decision: "KEEP_SEPARATOR",
           confidence: 1.0,
+          reason: reason,
         });
       } else {
         llmCands.push(c);
@@ -813,10 +853,17 @@ function joinSoftLinebreaksDefault(text) {
       tokenStats.completion_tokens,
     );
 
+    // Break down local keep rules by reason
+    const keepReasons = {};
+    for (const k of localKeep) {
+      keepReasons[k.reason] = (keepReasons[k.reason] || 0) + 1;
+    }
+    
     const summary = {
       mode: NO_LLM ? "no-llm" : "llm",
       hyphen_candidates_total: hyphenCands.length,
       applied_keep_rules: localKeep.length,
+      keep_rules_breakdown: keepReasons,
       applied_model_patches: appliedAll.length - localKeep.length,
       flagged_low_confidence: flagged.length,
       default_join_with_space_applied: finalText !== working,
