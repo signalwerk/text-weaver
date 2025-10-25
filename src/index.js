@@ -576,6 +576,7 @@ function applyHyphenPatches(original, candidates, decisions, threshold) {
     }
   }
 
+  // Sort patches by position (start) in ascending order for overlap detection
   patches.sort((a, b) => a.start - b.start);
   
   // Detect overlapping patches
@@ -596,32 +597,38 @@ function applyHyphenPatches(original, candidates, decisions, threshold) {
     }
   }
 
+  // Sort patches in REVERSE order (end to start)
+  // This way, applying patches doesn't affect positions of earlier patches
+  nonOverlapping.sort((a, b) => b.start - a.start);
+
   let text = original;
-  let offset = 0;
   const applied = [];
   const failedSanity = [];
   
+  // Apply patches from end to start - no offset tracking needed!
   for (const p of nonOverlapping) {
-    const realStart = p.start + offset;
-    const realEnd = p.end + offset;
-    const slice = text.slice(realStart, realEnd);
+    const slice = text.slice(p.start, p.end);
     
-    // sanity check: expect newline within slice
+    // Sanity check: expect newline within slice
     if (!slice.includes("\n")) {
       failedSanity.push(p.id);
       warnings.push({
         type: "sanity_check_failed",
         id: p.id,
-        slice_preview: JSON.stringify(slice),
-        message: `Sanity check failed for ${p.id}: no newline in span (offset may have shifted)`,
+        slice_preview: JSON.stringify(slice.substring(0, 50)),
+        span: `${p.start}-${p.end}`,
+        message: `Sanity check failed for ${p.id}: no newline in span [${p.start}:${p.end}]`,
       });
       continue;
     }
     
-    text = text.slice(0, realStart) + p.replacement + text.slice(realEnd);
-    offset += p.replacement.length - (realEnd - realStart);
+    // Apply patch: replace span with replacement
+    text = text.slice(0, p.start) + p.replacement + text.slice(p.end);
     applied.push(p);
   }
+  
+  // Sort applied patches back to original order for reporting
+  applied.sort((a, b) => a.start - b.start);
   
   return { text, applied, low, warnings, missingResponses, overlapping, failedSanity };
 }
@@ -700,6 +707,9 @@ function joinSoftLinebreaksDefault(text) {
           batches.push(currentCands.slice(i, i + MAX_CANDIDATES_PER_CALL));
         }
 
+        // Collect ALL decisions from ALL batches first
+        const allDecisions = [];
+        
         for (let i = 0; i < batches.length; i++) {
           const batch = batches[i];
           const { system, userPayload } = buildPrompt(working, batch);
@@ -742,31 +752,37 @@ function joinSoftLinebreaksDefault(text) {
                 2,
               ),
             );
-            const {
-              text: newText,
-              applied,
-              low,
-              warnings,
-              missingResponses,
-              overlapping,
-              failedSanity,
-            } = applyHyphenPatches(
-              working,
-              batch,
-              decisions,
-              CONFIDENCE_THRESHOLD,
-            );
-            working = newText;
-            appliedAll = appliedAll.concat(applied);
-            flagged = flagged.concat(low);
-            allWarnings = allWarnings.concat(warnings);
-            
-            // Log warnings for this batch
-            if (warnings.length > 0) {
-              console.error(`\n⚠️  Batch ${i + 1} Warnings:`);
-              for (const w of warnings) {
-                console.error(`  - [${w.type}] ${w.message}`);
-              }
+            allDecisions.push(...decisions);
+          }
+        }
+        
+        // Apply ALL patches at once from the original working text
+        // This ensures spans remain valid since we work from end to start
+        if (!NO_LLM && allDecisions.length > 0) {
+          const {
+            text: newText,
+            applied,
+            low,
+            warnings,
+            missingResponses,
+            overlapping,
+            failedSanity,
+          } = applyHyphenPatches(
+            working,
+            currentCands,
+            allDecisions,
+            CONFIDENCE_THRESHOLD,
+          );
+          working = newText;
+          appliedAll = appliedAll.concat(applied);
+          flagged = flagged.concat(low);
+          allWarnings = allWarnings.concat(warnings);
+          
+          // Log warnings after all patches applied
+          if (warnings.length > 0) {
+            console.error(`\n⚠️  Patch Application Warnings:`);
+            for (const w of warnings) {
+              console.error(`  - [${w.type}] ${w.message}`);
             }
           }
         }
@@ -785,12 +801,6 @@ function joinSoftLinebreaksDefault(text) {
           );
         }
       }
-    }
-
-    // Handle case when NO_LLM is true, DEBUG is false, and we have candidates
-    // (didn't enter the above block because (!NO_LLM || DEBUG) was false)
-    if (NO_LLM && !DEBUG && llmCands.length) {
-      console.error(`Skipping ${llmCands.length} candidates (--no-llm mode)`);
     }
 
     // 5) Default join of remaining single linebreaks
