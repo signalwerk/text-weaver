@@ -1,12 +1,29 @@
 {
   "name": "text-weaver",
-  "version": "1.1.0",
+  "version": "1.2.0",
+  "description": "Rejoins wrapped lines and fixes hyphen-splits with a LLM (or without it).",
   "type": "module",
+  "main": "./src/index.js",
+  "types": "./src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
+    },
+    "./cli": "./src/cli.js"
+  },
+  "files": [
+    "src"
+  ],
   "bin": {
-    "textweaver": "./src/index.js"
+    "textweaver": "./src/cli.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/signalwerk/text-weaver.git"
   },
   "scripts": {
-    "start": "node src/index.js",
+    "start": "node src/cli.js",
     "test": "sh test.sh"
   },
   "dependencies": {

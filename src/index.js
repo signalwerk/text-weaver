@@ -1,114 +1,39 @@
-#!/usr/bin/env node
 /**
  * Hyphen-split fixer with optional LLM classification.
  *
  * - Only hyphen-at-line-end splits are sent to the LLM.
  * - Single non-paragraph linebreaks are joined with a single space by default.
  * - Word-based context windows (configurable).
- * - keep-hyphens.txt = rule list to always KEEP hyphen and join (skip LLM).
+ * - keepHyphens = rule list to always KEEP hyphen and join (skip LLM).
+ *
+ * This module has no Node.js dependencies and runs in the browser as well.
+ * The CLI lives in ./cli.js.
  *
  * Usage:
- *   node src/index.js input.txt --output output.txt
- *   node src/index.js --no-llm input.txt -o output.txt  # Skip LLM, use rules only
- *   # or pipe (legacy, but may include debug output from libraries):
- *   node src/index.js input.txt > output.txt
- *   cat input.txt | node src/index.js > output.txt
- *
- * Flags:
- *   --no-llm           Skip LLM processing; only apply keep-hyphens.txt rules
- *   --output, -o FILE  Write output to FILE instead of stdout
- *   --debug            Write LLM requests/responses to .debug/ folder
- *
- * Env (.env supported):
- *   OPENAI_API_KEY=sk-...   (required unless --no-llm is used)
- *   OPENAI_MODEL=gpt-4o-mini
- *   MAX_CANDIDATES_PER_CALL=20
- *   CONFIDENCE_THRESHOLD=0.7
- *   WORD_CONTEXT_BEFORE=6
- *   WORD_CONTEXT_AFTER=6
+ *   import { unwrapText } from "text-weaver";
+ *   const { text, summary } = await unwrapText(input, { apiKey: "sk-..." });
+ *   const { text } = await unwrapText(input, { llm: false }); // rules only
  */
 
-import fs from "node:fs";
-import path from "node:path";
-import process from "node:process";
-import dotenv from "dotenv";
+import { defaultKeepHyphens } from "./keep-hyphens.js";
 
-dotenv.config();
+export { defaultKeepHyphens };
 
-// ---------- Parse CLI arguments ----------
-const args = process.argv.slice(2);
-const NO_LLM = args.includes("--no-llm");
-const DEBUG = args.includes("--debug");
+export const defaultOptions = {
+  llm: true,
+  model: "gpt-4o-mini",
+  maxCandidatesPerCall: 20,
+  confidenceThreshold: 0.7,
+  wordContextBefore: 6,
+  wordContextAfter: 6,
+};
 
-// Find output file (--output <file> or -o <file>)
-let outputPath = null;
-const outputFlagIndex = args.findIndex(
-  (arg) => arg === "--output" || arg === "-o",
-);
-if (outputFlagIndex !== -1 && args[outputFlagIndex + 1]) {
-  outputPath = args[outputFlagIndex + 1];
-}
-
-// Find input file (non-flag argument that isn't the output path)
-const inputPath =
-  args.find(
-    (arg, idx) =>
-      !arg.startsWith("--") &&
-      !arg.startsWith("-") &&
-      arg !== outputPath &&
-      args[idx - 1] !== "--output" &&
-      args[idx - 1] !== "-o",
-  ) || null;
-
-// Debug directory
-const DEBUG_DIR = path.resolve(process.cwd(), ".debug");
-if (DEBUG && !fs.existsSync(DEBUG_DIR)) {
-  fs.mkdirSync(DEBUG_DIR, { recursive: true });
-}
-
-// ---------- Config ----------
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-if (!NO_LLM && !OPENAI_API_KEY) {
-  console.error("ERROR: Missing OPENAI_API_KEY in environment.");
-  console.error("Use --no-llm flag to skip LLM processing.");
-  process.exit(1);
-}
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
-const MAX_CANDIDATES_PER_CALL = Number(
-  process.env.MAX_CANDIDATES_PER_CALL || 20,
-);
-const CONFIDENCE_THRESHOLD = Number(process.env.CONFIDENCE_THRESHOLD || 0.7);
-const WORD_CONTEXT_BEFORE = Number(process.env.WORD_CONTEXT_BEFORE || 6);
-const WORD_CONTEXT_AFTER = Number(process.env.WORD_CONTEXT_AFTER || 6);
-const KEEP_HYPHENS_PATH = path.resolve(process.cwd(), "keep-hyphens.txt");
-
-// ---------- IO ----------
-async function readAllText(maybePath) {
-  if (maybePath && fs.existsSync(maybePath)) {
-    return fs.readFileSync(maybePath, "utf8");
-  }
-  return await new Promise((resolve, reject) => {
-    let data = "";
-    process.stdin.setEncoding("utf8");
-    process.stdin.on("data", (chunk) => (data += chunk));
-    process.stdin.on("end", () => resolve(data));
-    process.stdin.on("error", reject);
-  });
-}
-
-// Trim each line; ignore blank or comment lines; case-insensitive set
-function loadKeepHyphenList() {
-  try {
-    if (!fs.existsSync(KEEP_HYPHENS_PATH)) return new Set();
-    const raw = fs.readFileSync(KEEP_HYPHENS_PATH, "utf8");
-    const items = raw
-      .split(/\r?\n/)
-      .map((s) => s.trim())
-      .filter((s) => s && !s.startsWith("#"));
-    return new Set(items.map((s) => s.toLowerCase()));
-  } catch {
-    return new Set();
-  }
+// Trim each line; ignore blank or comment lines
+export function parseKeepHyphenList(raw) {
+  return raw
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .filter((s) => s && !s.startsWith("#"));
 }
 
 // ---------- Text helpers ----------
@@ -183,7 +108,7 @@ function leftCompoundToken(text, pos) {
   // Look backwards to capture: word-word-word or word/word pattern
   let i = pos - 1;
   let compound = "";
-  
+
   // Go backwards collecting letters, hyphens, and slashes
   while (i >= 0) {
     const ch = text[i];
@@ -194,7 +119,7 @@ function leftCompoundToken(text, pos) {
       break;
     }
   }
-  
+
   // Remove trailing separator if present
   return compound.replace(/[-\/]$/, "");
 }
@@ -208,7 +133,13 @@ function leftCompoundToken(text, pos) {
  * Span covers "[-/]<spaces>\n<spaces>" up to just before the first non-space char.
  * Leading/trailing spaces on either line won't break detection.
  */
-function buildHyphenCandidates(text) {
+export function buildHyphenCandidates(
+  text,
+  {
+    wordContextBefore: contextBefore = defaultOptions.wordContextBefore,
+    wordContextAfter: contextAfter = defaultOptions.wordContextAfter,
+  } = {},
+) {
   const cands = [];
   // Match both hyphen and slash at end of line
   const re = /(\p{L}+)([-\/])[ \t]*\n[ \t]*([^\s])/gu;
@@ -230,7 +161,7 @@ function buildHyphenCandidates(text) {
 
     // Right token (first word after the split)
     const rightToken = rightWordToken(text, spanEnd);
-    
+
     // Extract full left compound (including any existing hyphens/slashes)
     // e.g., "state-of-the" for "state-of-the-\nart" or "A" for "A/\nB"
     const leftCompound = leftCompoundToken(text, spanStart);
@@ -238,13 +169,13 @@ function buildHyphenCandidates(text) {
     // Determine if this is a special case that should auto-keep the separator
     let autoKeep = false;
     let autoReason = "";
-    
+
     // Rule 1: Slash at end of line → always keep (e.g., A/B-Testing)
     if (separator === "/") {
       autoKeep = true;
       autoReason = "slash";
     }
-    
+
     // Rule 2: Hyphen followed by uppercase letter → likely compound (e.g., Time-Series)
     if (separator === "-" && rightToken && /^\p{Lu}/u.test(rightToken)) {
       autoKeep = true;
@@ -253,14 +184,14 @@ function buildHyphenCandidates(text) {
 
     // Word-based context windows
     // Left context: words before the compound, then the compound with separator
-    const beforeCompound = wordContextBefore(text, idx - (leftCompound.length - leftWord.length), WORD_CONTEXT_BEFORE);
+    const beforeCompound = wordContextBefore(text, idx - (leftCompound.length - leftWord.length), contextBefore);
     const left_context = (beforeCompound ? beforeCompound + " " : "") + leftCompound + separator;
 
     // Right context: right token, then words after it
     const afterRight = wordContextAfter(
       text,
       spanEnd + rightToken.length,
-      WORD_CONTEXT_AFTER,
+      contextAfter,
     );
     const right_context = rightToken + (afterRight ? " " + afterRight : "");
 
@@ -297,7 +228,7 @@ function buildHyphenCandidates(text) {
  *
  * Returns the parsed object or null if parsing fails.
  */
-function sanitizeAndParseLLMResponse(content) {
+export function sanitizeAndParseLLMResponse(content) {
   if (typeof content !== "string" || !content.trim()) {
     return null;
   }
@@ -432,28 +363,29 @@ function buildPrompt(original, candidates) {
   };
 }
 
-// Token tracking and cost calculation
-const tokenStats = {
-  prompt_tokens: 0,
-  completion_tokens: 0,
-  total_tokens: 0,
-  requests: 0,
-};
-
 // Pricing per 1M tokens (as of 2025)
 const PRICING = {
   "gpt-4o-mini": { input: 0.15, output: 0.6 },
   "gpt-4o": { input: 2.5, output: 10.0 },
 };
 
-function calculateCost(model, promptTokens, completionTokens) {
+export function calculateCost(model, promptTokens, completionTokens) {
   const pricing = PRICING[model] || PRICING["gpt-4o-mini"];
   const inputCost = (promptTokens / 1_000_000) * pricing.input;
   const outputCost = (completionTokens / 1_000_000) * pricing.output;
   return inputCost + outputCost;
 }
 
-async function callOpenAIChatJSON({ model, system, userPayload, batchNumber }) {
+async function callOpenAIChatJSON({
+  fetchFn,
+  apiKey,
+  model,
+  system,
+  userPayload,
+  batchNumber,
+  tokenStats,
+  onResponse,
+}) {
   const requestPayload = {
     model,
     temperature: 0,
@@ -464,10 +396,10 @@ async function callOpenAIChatJSON({ model, system, userPayload, batchNumber }) {
     ],
   };
 
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+  const res = await fetchFn("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
+      Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify(requestPayload),
@@ -487,14 +419,7 @@ async function callOpenAIChatJSON({ model, system, userPayload, batchNumber }) {
     tokenStats.requests += 1;
   }
 
-  // Write debug response file
-  if (DEBUG) {
-    const responseFile = path.join(
-      DEBUG_DIR,
-      `response_batch_${batchNumber}.json`,
-    );
-    fs.writeFileSync(responseFile, JSON.stringify(data, null, 2), "utf8");
-  }
+  onResponse?.({ batchNumber, data });
 
   const content = data?.choices?.[0]?.message?.content || "";
 
@@ -560,9 +485,9 @@ function applyHyphenPatches(original, candidates, decisions, threshold) {
   for (const cand of candidates) {
     const d = byId.get(cand.id);
     if (!d) continue;
-    
+
     if (typeof d.confidence !== "number") d.confidence = 0;
-    
+
     if (d.confidence < threshold) {
       d.flag_review = true;
       low.push({
@@ -579,7 +504,7 @@ function applyHyphenPatches(original, candidates, decisions, threshold) {
       });
       continue;
     }
-    
+
     if (d.decision === "UNHYPHENATE" || d.decision === "KEEP_HYPHEN_JOIN") {
       patches.push({
         id: d.id,
@@ -601,7 +526,7 @@ function applyHyphenPatches(original, candidates, decisions, threshold) {
 
   // Sort patches by position (start) in ascending order for overlap detection
   patches.sort((a, b) => a.start - b.start);
-  
+
   // Detect overlapping patches
   const nonOverlapping = [];
   const overlapping = [];
@@ -627,11 +552,11 @@ function applyHyphenPatches(original, candidates, decisions, threshold) {
   let text = original;
   const applied = [];
   const failedSanity = [];
-  
+
   // Apply patches from end to start - no offset tracking needed!
   for (const p of nonOverlapping) {
     const slice = text.slice(p.start, p.end);
-    
+
     // Sanity check: expect newline within slice
     if (!slice.includes("\n")) {
       failedSanity.push(p.id);
@@ -644,15 +569,15 @@ function applyHyphenPatches(original, candidates, decisions, threshold) {
       });
       continue;
     }
-    
+
     // Apply patch: replace span with replacement
     text = text.slice(0, p.start) + p.replacement + text.slice(p.end);
     applied.push(p);
   }
-  
+
   // Sort applied patches back to original order for reporting
   applied.sort((a, b) => a.start - b.start);
-  
+
   return { text, applied, low, warnings, missingResponses, overlapping, failedSanity };
 }
 
@@ -661,7 +586,7 @@ function applyHyphenPatches(original, candidates, decisions, threshold) {
  * - Handles stray spaces around the newline.
  * - Does NOT join when the char immediately before newline is a hyphen or slash (left for review).
  */
-function joinSoftLinebreaksDefault(text) {
+export function joinSoftLinebreaksDefault(text) {
   return text.replace(/([^\n])[\t ]*\n(?!\n)[\t ]*/g, (m, prev) => {
     if (prev === "-" || prev === "/") return m; // keep as-is after hyphen or slash
     return prev + " ";
@@ -669,290 +594,234 @@ function joinSoftLinebreaksDefault(text) {
 }
 
 // ---------- Main ----------
-(async function main() {
-  try {
-    const original = await readAllText(inputPath);
+/**
+ * Unwrap `original`: fix hyphen/slash splits and join soft linebreaks.
+ *
+ * Options (see defaultOptions):
+ *   llm                  false = rules only, no API key required
+ *   apiKey               OpenAI API key (required when llm is true)
+ *   model, maxCandidatesPerCall, confidenceThreshold,
+ *   wordContextBefore, wordContextAfter
+ *   keepHyphens          compounds to always keep (case-insensitive)
+ *   fetch                fetch implementation (default: globalThis.fetch)
+ *   onRequest({ batchNumber, totalBatches, payload, sent })
+ *                        called for every batch, also when llm is false
+ *   onResponse({ batchNumber, data })    raw OpenAI response
+ *   onDecisions({ batchNumber, totalBatches, decisions })
+ *   onLog(message)       progress / diagnostic messages
+ *
+ * Returns { text, summary, flagged, warnings, tokenUsage }.
+ */
+export async function unwrapText(original, options = {}) {
+  const {
+    llm,
+    apiKey,
+    model,
+    maxCandidatesPerCall,
+    confidenceThreshold,
+    wordContextBefore,
+    wordContextAfter,
+  } = { ...defaultOptions, ...options };
+  const keepHyphens = options.keepHyphens ?? defaultKeepHyphens;
+  const fetchFn = options.fetch ?? globalThis.fetch.bind(globalThis);
+  const { onRequest, onResponse, onDecisions } = options;
+  const log = options.onLog ?? (() => {});
 
-    // 1) Detect hyphen candidates
-    const hyphenCands = buildHyphenCandidates(original);
+  if (llm && !apiKey) {
+    throw new Error("Missing OpenAI API key (or use llm: false).");
+  }
 
-    // 2) Apply algorithmic rules and keep-hyphens.txt decisions locally
-    const keepList = loadKeepHyphenList();
-    const localKeep = [];
-    const llmCands = [];
-    for (const c of hyphenCands) {
-      let shouldKeep = false;
-      let reason = "";
-      
-      // Check algorithmic rules first (slash, hyphen+uppercase)
-      if (c.autoKeep) {
+  const contextOptions = { wordContextBefore, wordContextAfter };
+  const tokenStats = {
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    total_tokens: 0,
+    requests: 0,
+  };
+
+  // 1) Detect hyphen candidates
+  const hyphenCands = buildHyphenCandidates(original, contextOptions);
+
+  // 2) Apply algorithmic rules and keep-hyphens decisions locally
+  const keepList = new Set(keepHyphens.map((s) => s.toLowerCase()));
+  const localKeep = [];
+  const llmCands = [];
+  for (const c of hyphenCands) {
+    let shouldKeep = false;
+    let reason = "";
+
+    // Check algorithmic rules first (slash, hyphen+uppercase)
+    if (c.autoKeep) {
+      shouldKeep = true;
+      reason = c.autoReason;
+    }
+
+    // Check keep-hyphens list (only for hyphen splits)
+    if (!shouldKeep && c.separator === "-") {
+      const compound = (c.leftCompound + "-" + c.rightToken).toLowerCase();
+      if (c.rightToken && keepList.has(compound)) {
         shouldKeep = true;
-        reason = c.autoReason;
+        reason = "keep-list";
       }
-      
-      // Check keep-hyphens.txt list (only for hyphen splits)
-      if (!shouldKeep && c.separator === "-") {
-        const compound = (c.leftCompound + "-" + c.rightToken).toLowerCase();
-        if (c.rightToken && keepList.has(compound)) {
-          shouldKeep = true;
-          reason = "keep-list";
-        }
+    }
+
+    if (shouldKeep) {
+      // Keep separator and remove break
+      localKeep.push({
+        id: c.id,
+        start: c.span.start,
+        end: c.span.end,
+        replacement: c.separator,
+        decision: "KEEP_SEPARATOR",
+        confidence: 1.0,
+        reason: reason,
+      });
+    } else {
+      llmCands.push(c);
+    }
+  }
+
+  // 3) Apply local keep patches first
+  let working = original;
+  if (localKeep.length) {
+    localKeep.sort((a, b) => a.start - b.start);
+    let offset = 0;
+    for (const p of localKeep) {
+      const s = p.start + offset,
+        e = p.end + offset;
+      working = working.slice(0, s) + p.replacement + working.slice(e);
+      offset += p.replacement.length - (e - s);
+    }
+  }
+
+  // 4) Send remaining candidates to LLM (if any), batched.
+  //    Without LLM the requests are still built when someone listens (debug).
+  let appliedAll = [...localKeep];
+  let flagged = [];
+  let allWarnings = [];
+
+  if ((llm || onRequest) && llmCands.length) {
+    // Rebuild candidates on current 'working' text to get accurate spans
+    const currentCands = buildHyphenCandidates(working, contextOptions);
+
+    if (currentCands.length === 0) {
+      log("Warning: No candidates found after applying keep-rules. Skipping LLM.");
+    } else {
+      const batches = [];
+      for (let i = 0; i < currentCands.length; i += maxCandidatesPerCall) {
+        batches.push(currentCands.slice(i, i + maxCandidatesPerCall));
       }
-      
-      if (shouldKeep) {
-        // Keep separator and remove break
-        localKeep.push({
-          id: c.id,
-          start: c.span.start,
-          end: c.span.end,
-          replacement: c.separator,
-          decision: "KEEP_SEPARATOR",
-          confidence: 1.0,
-          reason: reason,
+
+      // Collect ALL decisions from ALL batches first
+      const allDecisions = [];
+
+      for (let i = 0; i < batches.length; i++) {
+        const batch = batches[i];
+        const { system, userPayload } = buildPrompt(working, batch);
+
+        onRequest?.({
+          batchNumber: i + 1,
+          totalBatches: batches.length,
+          sent: llm,
+          payload: {
+            model,
+            temperature: 0,
+            response_format: { type: "json_object" },
+            messages: [
+              { role: "system", content: system },
+              { role: "user", content: userPayload },
+            ],
+          },
         });
-      } else {
-        llmCands.push(c);
+
+        // Only call API in LLM mode
+        if (llm) {
+          const decisions = await callOpenAIChatJSON({
+            fetchFn,
+            apiKey,
+            model,
+            system,
+            userPayload,
+            batchNumber: i + 1,
+            tokenStats,
+            onResponse,
+          });
+          onDecisions?.({
+            batchNumber: i + 1,
+            totalBatches: batches.length,
+            decisions,
+          });
+          allDecisions.push(...decisions);
+        }
       }
-    }
 
-    // 3) Apply local keep patches first
-    let working = original;
-    if (localKeep.length) {
-      localKeep.sort((a, b) => a.start - b.start);
-      let offset = 0;
-      for (const p of localKeep) {
-        const s = p.start + offset,
-          e = p.end + offset;
-        working = working.slice(0, s) + p.replacement + working.slice(e);
-        offset += p.replacement.length - (e - s);
-      }
-    }
-
-    // 4) Send remaining candidates to LLM (if any and if not NO_LLM), batched
-    let appliedAll = [...localKeep];
-    let flagged = [];
-    let allWarnings = [];
-
-    if ((!NO_LLM || DEBUG) && llmCands.length) {
-      // Rebuild candidates on current 'working' text to get accurate spans
-      const currentCands = buildHyphenCandidates(working);
-
-      if (currentCands.length === 0) {
-        console.error(
-          "Warning: No candidates found after applying keep-rules. Skipping LLM.",
+      // Apply ALL patches at once from the original working text
+      // This ensures spans remain valid since we work from end to start
+      if (llm && allDecisions.length > 0) {
+        const { text: newText, applied, low, warnings } = applyHyphenPatches(
+          working,
+          currentCands,
+          allDecisions,
+          confidenceThreshold,
         );
-      } else {
-        const batches = [];
-        for (let i = 0; i < currentCands.length; i += MAX_CANDIDATES_PER_CALL) {
-          batches.push(currentCands.slice(i, i + MAX_CANDIDATES_PER_CALL));
-        }
-
-        // Collect ALL decisions from ALL batches first
-        const allDecisions = [];
-        
-        for (let i = 0; i < batches.length; i++) {
-          const batch = batches[i];
-          const { system, userPayload } = buildPrompt(working, batch);
-
-          // Write debug request file (in both LLM and no-LLM modes)
-          if (DEBUG) {
-            const requestPayload = {
-              model: OPENAI_MODEL,
-              temperature: 0,
-              response_format: { type: "json_object" },
-              messages: [
-                { role: "system", content: system },
-                { role: "user", content: userPayload },
-              ],
-            };
-            const suffix = NO_LLM ? "_noLLM" : "";
-            const requestFile = path.join(
-              DEBUG_DIR,
-              `request_batch_${i + 1}${suffix}.json`,
-            );
-            fs.writeFileSync(
-              requestFile,
-              JSON.stringify(requestPayload, null, 2),
-              "utf8",
-            );
-          }
-
-          // Only call API if not in NO_LLM mode
-          if (!NO_LLM) {
-            const decisions = await callOpenAIChatJSON({
-              model: OPENAI_MODEL,
-              system,
-              userPayload,
-              batchNumber: i + 1,
-            });
-            console.error(
-              JSON.stringify(
-                { batch: i + 1, totalBatches: batches.length, decisions },
-                null,
-                2,
-              ),
-            );
-            allDecisions.push(...decisions);
-          }
-        }
-        
-        // Apply ALL patches at once from the original working text
-        // This ensures spans remain valid since we work from end to start
-        if (!NO_LLM && allDecisions.length > 0) {
-          const {
-            text: newText,
-            applied,
-            low,
-            warnings,
-            missingResponses,
-            overlapping,
-            failedSanity,
-          } = applyHyphenPatches(
-            working,
-            currentCands,
-            allDecisions,
-            CONFIDENCE_THRESHOLD,
-          );
-          working = newText;
-          appliedAll = appliedAll.concat(applied);
-          flagged = flagged.concat(low);
-          allWarnings = allWarnings.concat(warnings);
-          
-          // Log warnings after all patches applied
-          if (warnings.length > 0) {
-            console.error(`\n⚠️  Patch Application Warnings:`);
-            for (const w of warnings) {
-              console.error(`  - [${w.type}] ${w.message}`);
-            }
-          }
-        }
-
-        // Log debug file creation in NO_LLM mode
-        if (NO_LLM && DEBUG) {
-          console.error(
-            `✓ Debug: Wrote ${batches.length} request file(s) to ${DEBUG_DIR}/`,
-          );
-        }
-
-        // Log skipping in NO_LLM mode (without debug)
-        if (NO_LLM && !DEBUG && llmCands.length) {
-          console.error(
-            `Skipping ${llmCands.length} candidates (--no-llm mode)`,
-          );
-        }
+        working = newText;
+        appliedAll = appliedAll.concat(applied);
+        flagged = flagged.concat(low);
+        allWarnings = allWarnings.concat(warnings);
       }
     }
+  }
 
-    // 5) Default join of remaining single linebreaks
-    const finalText = joinSoftLinebreaksDefault(working);
+  // 5) Default join of remaining single linebreaks
+  const finalText = joinSoftLinebreaksDefault(working);
 
-    // 6) Audit with token stats
+  // 6) Audit with token stats
+  // Break down local keep rules by reason
+  const keepReasons = {};
+  for (const k of localKeep) {
+    keepReasons[k.reason] = (keepReasons[k.reason] || 0) + 1;
+  }
+
+  const summary = {
+    mode: llm ? "llm" : "no-llm",
+    hyphen_candidates_total: hyphenCands.length,
+    applied_keep_rules: localKeep.length,
+    keep_rules_breakdown: keepReasons,
+    applied_model_patches: appliedAll.length - localKeep.length,
+    flagged_low_confidence: flagged.length,
+    default_join_with_space_applied: finalText !== working,
+    skipped_llm_candidates: llm ? 0 : llmCands.length,
+  };
+
+  let tokenUsage;
+  if (llm && tokenStats.requests > 0) {
     const totalCost = calculateCost(
-      OPENAI_MODEL,
+      model,
       tokenStats.prompt_tokens,
       tokenStats.completion_tokens,
     );
-
-    // Break down local keep rules by reason
-    const keepReasons = {};
-    for (const k of localKeep) {
-      keepReasons[k.reason] = (keepReasons[k.reason] || 0) + 1;
-    }
-    
-    const summary = {
-      mode: NO_LLM ? "no-llm" : "llm",
-      hyphen_candidates_total: hyphenCands.length,
-      applied_keep_rules: localKeep.length,
-      keep_rules_breakdown: keepReasons,
-      applied_model_patches: appliedAll.length - localKeep.length,
-      flagged_low_confidence: flagged.length,
-      default_join_with_space_applied: finalText !== working,
-      skipped_llm_candidates: NO_LLM ? llmCands.length : 0,
+    tokenUsage = {
+      ...tokenStats,
+      model,
+      estimated_cost_usd: parseFloat(totalCost.toFixed(6)),
     };
-
-    if (!NO_LLM && tokenStats.requests > 0) {
-      summary.token_usage = {
-        prompt_tokens: tokenStats.prompt_tokens,
-        completion_tokens: tokenStats.completion_tokens,
-        total_tokens: tokenStats.total_tokens,
-        requests: tokenStats.requests,
-        model: OPENAI_MODEL,
-        estimated_cost_usd: parseFloat(totalCost.toFixed(6)),
-      };
-    }
-
-    // Add warnings summary
-    if (allWarnings.length > 0) {
-      const warningsByType = {};
-      for (const w of allWarnings) {
-        warningsByType[w.type] = (warningsByType[w.type] || 0) + 1;
-      }
-      summary.warnings = warningsByType;
-    }
-
-    console.error(
-      JSON.stringify(
-        {
-          summary,
-          flagged,
-          warnings: allWarnings.length > 0 ? allWarnings : undefined,
-        },
-        null,
-        2,
-      ),
-    );
-
-    // Display token summary in a friendly format
-    if (!NO_LLM && tokenStats.requests > 0) {
-      console.error("\n" + "=".repeat(60));
-      console.error("📊 TOKEN USAGE & COST SUMMARY");
-      console.error("=".repeat(60));
-      console.error(`Model:              ${OPENAI_MODEL}`);
-      console.error(`API Requests:       ${tokenStats.requests}`);
-      console.error(
-        `Prompt Tokens:      ${tokenStats.prompt_tokens.toLocaleString()}`,
-      );
-      console.error(
-        `Completion Tokens:  ${tokenStats.completion_tokens.toLocaleString()}`,
-      );
-      console.error(
-        `Total Tokens:       ${tokenStats.total_tokens.toLocaleString()}`,
-      );
-      console.error(`Estimated Cost:     $${totalCost.toFixed(6)} USD`);
-      console.error("=".repeat(60) + "\n");
-    }
-    
-    // Display warnings summary if any
-    if (allWarnings.length > 0) {
-      console.error("\n" + "=".repeat(60));
-      console.error("⚠️  WARNINGS SUMMARY");
-      console.error("=".repeat(60));
-      const warningsByType = {};
-      for (const w of allWarnings) {
-        warningsByType[w.type] = (warningsByType[w.type] || []);
-        warningsByType[w.type].push(w);
-      }
-      for (const [type, warnings] of Object.entries(warningsByType)) {
-        console.error(`\n${type.toUpperCase().replace(/_/g, " ")} (${warnings.length}):`);
-        for (const w of warnings.slice(0, 5)) { // Show first 5 of each type
-          console.error(`  • ${w.id}: ${w.message}`);
-        }
-        if (warnings.length > 5) {
-          console.error(`  ... and ${warnings.length - 5} more`);
-        }
-      }
-      console.error("=".repeat(60) + "\n");
-    }
-
-    // Write output to file or stdout
-    if (outputPath) {
-      fs.writeFileSync(outputPath, finalText, "utf8");
-      console.error(`✓ Output written to: ${outputPath}`);
-    } else {
-      process.stdout.write(finalText);
-    }
-  } catch (err) {
-    console.error("ERROR:", err?.message || String(err));
-    process.exit(1);
+    summary.token_usage = tokenUsage;
   }
-})();
+
+  // Add warnings summary
+  if (allWarnings.length > 0) {
+    const warningsByType = {};
+    for (const w of allWarnings) {
+      warningsByType[w.type] = (warningsByType[w.type] || 0) + 1;
+    }
+    summary.warnings = warningsByType;
+  }
+
+  return {
+    text: finalText,
+    summary,
+    flagged,
+    warnings: allWarnings,
+    tokenUsage,
+  };
+}

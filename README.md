@@ -51,7 +51,7 @@ The system uses state-of-the-art Machine-Learning.
 
 - `vari-\nous` → **UNHYPHENATE** (LLM decision) → `various`
 - `scenar-\nios` → **UNHYPHENATE** (LLM decision) → `scenarios`
-- `state-of-the-\nart` → **KEEP_HYPHEN_JOIN** (from keep-hyphens.txt) → `state-of-the-art`
+- `state-of-the-\nart` → **KEEP_HYPHEN_JOIN** (from the keep-hyphen list) → `state-of-the-art`
 - All other single line breaks were joined with a space.
 
 ## Principles
@@ -60,23 +60,71 @@ The system uses state-of-the-art Machine-Learning.
 - **Deterministic edits:** changes are applied as small, position-based patches.
 - **Structure preserved:** paragraph breaks remain untouched.
 
-## Usage
+## Installation
+
+The package is not published to npm. Install it directly from GitHub:
 
 ```bash
-# With LLM (requires OPENAI_API_KEY)
-node src/index.js input.txt --output output.txt
-node src/index.js input.txt -o output.txt
+npm install github:signalwerk/text-weaver
+# or pin a tag / commit
+npm install github:signalwerk/text-weaver#v1.2.0
+```
 
-# Without LLM (only applies keep-hyphens.txt rules and joins line breaks)
-node src/index.js --no-llm input.txt -o output.txt
+## Library usage
+
+`src/index.js` has no Node.js dependencies and runs in the browser (e.g. bundled with Vite) as well as in Node 18+.
+
+```js
+import { unwrapText } from "text-weaver";
+
+// With LLM
+const { text, summary, flagged, warnings, tokenUsage } = await unwrapText(input, {
+  apiKey: "sk-...",
+});
+
+// Without LLM (rule-based only)
+const { text } = await unwrapText(input, { llm: false });
+```
+
+Options (all optional except `apiKey` when `llm` is true):
+
+| Option                 | Default                | Description                                        |
+| ---------------------- | ---------------------- | -------------------------------------------------- |
+| `llm`                  | `true`                 | `false` applies only the rules, no API key needed  |
+| `apiKey`               |                        | OpenAI API key                                     |
+| `model`                | `gpt-4o-mini`          | Chat-completions model                             |
+| `confidenceThreshold`  | `0.7`                  | Minimum confidence for applying changes            |
+| `maxCandidatesPerCall` | `20`                   | Batch size for API calls                           |
+| `wordContextBefore`    | `6`                    | Context words before hyphen                        |
+| `wordContextAfter`     | `6`                    | Context words after hyphen                         |
+| `keepHyphens`          | `defaultKeepHyphens`   | Compounds to always keep (case-insensitive)        |
+| `fetch`                | `globalThis.fetch`     | Custom fetch implementation                        |
+| `onRequest`            |                        | Called with each batch request payload             |
+| `onResponse`           |                        | Called with each raw OpenAI response               |
+| `onDecisions`          |                        | Called with the decisions of each batch            |
+| `onLog`                |                        | Called with diagnostic messages                    |
+
+Also exported: `defaultOptions`, `defaultKeepHyphens`, `parseKeepHyphenList`, `buildHyphenCandidates`, `joinSoftLinebreaksDefault`, `sanitizeAndParseLLMResponse`, `calculateCost`.
+
+## CLI usage
+
+```bash
+# when installed: npx textweaver ... (same flags)
+
+# With LLM (requires OPENAI_API_KEY)
+node src/cli.js input.txt --output output.txt
+node src/cli.js input.txt -o output.txt
+
+# Without LLM (only applies keep-hyphen rules and joins line breaks)
+node src/cli.js --no-llm input.txt -o output.txt
 
 # With debug mode (writes LLM requests/responses to .debug/ folder)
-node src/index.js --debug input.txt -o output.txt
-node src/index.js --no-llm --debug input.txt -o output.txt
+node src/cli.js --debug input.txt -o output.txt
+node src/cli.js --no-llm --debug input.txt -o output.txt
 
 # Pipe to stdout (legacy, may include library debug messages)
-node src/index.js input.txt > output.txt
-cat input.txt | node src/index.js > output.txt
+node src/cli.js input.txt > output.txt
+cat input.txt | node src/cli.js > output.txt
 ```
 
 ## Configuration
@@ -98,7 +146,8 @@ cat input.txt | node src/index.js > output.txt
 
 ### Files
 
-- **`keep-hyphens.txt`:** List of compound words to always preserve (case-insensitive, one per line)
+- **`src/keep-hyphens.js`:** Built-in list of compound words to always preserve (case-insensitive)
+- **`keep-hyphens.txt`** (optional, in the working directory): replaces the built-in list for the CLI (one per line, `#` for comments)
 
 ### Token Tracking & Cost
 
