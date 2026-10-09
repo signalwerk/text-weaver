@@ -14,6 +14,7 @@
  *   --output, -o FILE  Write output to FILE instead of stdout
  *   --debug            Write LLM requests/responses to .debug/ folder
  *   --temperature N    Send this temperature to the model (default: not sent)
+ *   --reasoning-effort LEVEL  Send this reasoning effort, e.g. low (default: not sent)
  *
  * Env (.env supported):
  *   OPENAI_API_KEY=sk-...   (required unless --no-llm is used)
@@ -64,6 +65,17 @@ if (temperatureFlagIndex !== -1) {
   }
 }
 
+// Find reasoning effort (--reasoning-effort <level>), not sent by default
+const reasoningFlagIndex = args.indexOf("--reasoning-effort");
+let reasoningEffort;
+if (reasoningFlagIndex !== -1) {
+  reasoningEffort = args[reasoningFlagIndex + 1];
+  if (!reasoningEffort || reasoningEffort.startsWith("-")) {
+    console.error("ERROR: --reasoning-effort needs a level, e.g. --reasoning-effort low");
+    process.exit(1);
+  }
+}
+
 // Find input file (non-flag argument that isn't the output path or a flag value)
 const inputPath =
   args.find(
@@ -73,7 +85,8 @@ const inputPath =
       arg !== outputPath &&
       args[idx - 1] !== "--output" &&
       args[idx - 1] !== "-o" &&
-      args[idx - 1] !== "--temperature",
+      args[idx - 1] !== "--temperature" &&
+      args[idx - 1] !== "--reasoning-effort",
   ) || null;
 
 // Debug directory
@@ -195,6 +208,7 @@ function printReport({ summary, flagged, warnings, tokenUsage }) {
       apiKey: OPENAI_API_KEY,
       model: OPENAI_MODEL,
       temperature,
+      reasoningEffort,
       maxCandidatesPerCall: envNumber(
         "MAX_CANDIDATES_PER_CALL",
         defaultOptions.maxCandidatesPerCall,

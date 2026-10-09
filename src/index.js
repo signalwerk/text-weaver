@@ -23,6 +23,7 @@ export const defaultOptions = {
   llm: true,
   model: "gpt-4o-mini",
   temperature: undefined, // not sent unless set
+  reasoningEffort: undefined, // not sent unless set
   maxCandidatesPerCall: 20,
   confidenceThreshold: 0.7,
   wordContextBefore: 6,
@@ -377,12 +378,19 @@ export function calculateCost(model, promptTokens, completionTokens) {
   return inputCost + outputCost;
 }
 
-// temperature is only sent when set, since not every model supports it
-// (e.g. reasoning models only accept the default)
-function buildRequestPayload({ model, temperature, system, userContent }) {
+// temperature and reasoning effort are only sent when set, since not every
+// model supports them (e.g. reasoning models only accept the default temperature)
+function buildRequestPayload({
+  model,
+  temperature,
+  reasoningEffort,
+  system,
+  userContent,
+}) {
   return {
     model,
     ...(temperature != null && { temperature }),
+    ...(reasoningEffort && { reasoning_effort: reasoningEffort }),
     response_format: { type: "json_object" },
     messages: [
       { role: "system", content: system },
@@ -396,6 +404,7 @@ async function callOpenAIChatJSON({
   apiKey,
   model,
   temperature,
+  reasoningEffort,
   system,
   userPayload,
   batchNumber,
@@ -405,6 +414,7 @@ async function callOpenAIChatJSON({
   const requestPayload = buildRequestPayload({
     model,
     temperature,
+    reasoningEffort,
     system,
     userContent: JSON.stringify(userPayload),
   });
@@ -614,6 +624,7 @@ export function joinSoftLinebreaksDefault(text) {
  *   llm                  false = rules only, no API key required
  *   apiKey               OpenAI API key (required when llm is true)
  *   temperature          sent to the model only when set (number)
+ *   reasoningEffort      sent as reasoning_effort only when set (e.g. "low")
  *   model, maxCandidatesPerCall, confidenceThreshold,
  *   wordContextBefore, wordContextAfter
  *   keepHyphens          compounds to always keep (case-insensitive)
@@ -632,6 +643,7 @@ export async function unwrapText(original, options = {}) {
     apiKey,
     model,
     temperature,
+    reasoningEffort,
     maxCandidatesPerCall,
     confidenceThreshold,
     wordContextBefore,
@@ -741,6 +753,7 @@ export async function unwrapText(original, options = {}) {
           payload: buildRequestPayload({
             model,
             temperature,
+            reasoningEffort,
             system,
             userContent: userPayload,
           }),
@@ -753,6 +766,7 @@ export async function unwrapText(original, options = {}) {
             apiKey,
             model,
             temperature,
+            reasoningEffort,
             system,
             userPayload,
             batchNumber: i + 1,

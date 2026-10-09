@@ -67,7 +67,7 @@ The package is not published to npm. Install it directly from GitHub:
 ```bash
 npm install github:signalwerk/text-weaver
 # or pin a tag / commit
-npm install github:signalwerk/text-weaver#v1.3.0
+npm install github:signalwerk/text-weaver#v1.4.0
 ```
 
 ## Library usage
@@ -94,6 +94,7 @@ Options (all optional except `apiKey` when `llm` is true):
 | `apiKey`               |                        | OpenAI API key                                     |
 | `model`                | `gpt-4o-mini`          | Chat-completions model                             |
 | `temperature`          | not sent               | Sent to the model only when set                    |
+| `reasoningEffort`      | not sent               | Sent as `reasoning_effort` only when set           |
 | `confidenceThreshold`  | `0.7`                  | Minimum confidence for applying changes            |
 | `maxCandidatesPerCall` | `20`                   | Batch size for API calls                           |
 | `wordContextBefore`    | `6`                    | Context words before hyphen                        |
@@ -138,6 +139,7 @@ cat input.txt | node src/cli.js > output.txt
 - **`--no-llm`:** Skip LLM processing entirely (no API key required)
 - **`--output FILE` or `-o FILE`:** Write to file directly (avoids library debug output in stdout)
 - **`--debug`:** Write LLM requests/responses to `.debug/` folder for inspection
+- **`--reasoning-effort LEVEL`:** Send this reasoning effort (e.g. `low`, `high`) to the model. Not sent by default; only reasoning models accept it
 - **`--temperature N`:** Send this temperature to the model. By default no temperature is sent, so the model's default applies (some models, e.g. reasoning models, only accept their default)
 
 ### Environment Variables

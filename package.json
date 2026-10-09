@@ -1,6 +1,6 @@
 {
   "name": "text-weaver",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Rejoins wrapped lines and fixes hyphen-splits with a LLM (or without it).",
   "type": "module",
   "main": "./src/index.js",

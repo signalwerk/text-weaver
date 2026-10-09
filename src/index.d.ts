@@ -6,6 +6,8 @@ export interface UnwrapOptions {
   model?: string;
   /** sent to the model only when set; some models only accept the default */
   temperature?: number | null;
+  /** sent as reasoning_effort only when set, e.g. "low" or "high" */
+  reasoningEffort?: string | null;
   maxCandidatesPerCall?: number;
   confidenceThreshold?: number;
   wordContextBefore?: number;
@@ -83,7 +85,7 @@ export const defaultOptions: Required<
     | "wordContextBefore"
     | "wordContextAfter"
   >
-> & { temperature: undefined };
+> & { temperature: undefined; reasoningEffort: undefined };
 export const defaultKeepHyphens: string[];
 
 export function unwrapText(
