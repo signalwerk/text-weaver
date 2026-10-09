@@ -4,6 +4,8 @@ export interface UnwrapOptions {
   /** OpenAI API key, required when llm is true */
   apiKey?: string;
   model?: string;
+  /** sent to the model only when set; some models only accept the default */
+  temperature?: number | null;
   maxCandidatesPerCall?: number;
   confidenceThreshold?: number;
   wordContextBefore?: number;
@@ -81,7 +83,7 @@ export const defaultOptions: Required<
     | "wordContextBefore"
     | "wordContextAfter"
   >
->;
+> & { temperature: undefined };
 export const defaultKeepHyphens: string[];
 
 export function unwrapText(

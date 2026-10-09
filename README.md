@@ -67,7 +67,7 @@ The package is not published to npm. Install it directly from GitHub:
 ```bash
 npm install github:signalwerk/text-weaver
 # or pin a tag / commit
-npm install github:signalwerk/text-weaver#v1.2.0
+npm install github:signalwerk/text-weaver#v1.3.0
 ```
 
 ## Library usage
@@ -93,6 +93,7 @@ Options (all optional except `apiKey` when `llm` is true):
 | `llm`                  | `true`                 | `false` applies only the rules, no API key needed  |
 | `apiKey`               |                        | OpenAI API key                                     |
 | `model`                | `gpt-4o-mini`          | Chat-completions model                             |
+| `temperature`          | not sent               | Sent to the model only when set                    |
 | `confidenceThreshold`  | `0.7`                  | Minimum confidence for applying changes            |
 | `maxCandidatesPerCall` | `20`                   | Batch size for API calls                           |
 | `wordContextBefore`    | `6`                    | Context words before hyphen                        |
@@ -118,6 +119,9 @@ node src/cli.js input.txt -o output.txt
 # Without LLM (only applies keep-hyphen rules and joins line breaks)
 node src/cli.js --no-llm input.txt -o output.txt
 
+# With a fixed temperature (default: not sent)
+node src/cli.js --temperature 0 input.txt -o output.txt
+
 # With debug mode (writes LLM requests/responses to .debug/ folder)
 node src/cli.js --debug input.txt -o output.txt
 node src/cli.js --no-llm --debug input.txt -o output.txt
@@ -134,6 +138,7 @@ cat input.txt | node src/cli.js > output.txt
 - **`--no-llm`:** Skip LLM processing entirely (no API key required)
 - **`--output FILE` or `-o FILE`:** Write to file directly (avoids library debug output in stdout)
 - **`--debug`:** Write LLM requests/responses to `.debug/` folder for inspection
+- **`--temperature N`:** Send this temperature to the model. By default no temperature is sent, so the model's default applies (some models, e.g. reasoning models, only accept their default)
 
 ### Environment Variables
 

@@ -13,6 +13,7 @@
  *   --no-llm           Skip LLM processing; only apply keep-hyphen rules
  *   --output, -o FILE  Write output to FILE instead of stdout
  *   --debug            Write LLM requests/responses to .debug/ folder
+ *   --temperature N    Send this temperature to the model (default: not sent)
  *
  * Env (.env supported):
  *   OPENAI_API_KEY=sk-...   (required unless --no-llm is used)
@@ -52,7 +53,18 @@ if (outputFlagIndex !== -1 && args[outputFlagIndex + 1]) {
   outputPath = args[outputFlagIndex + 1];
 }
 
-// Find input file (non-flag argument that isn't the output path)
+// Find temperature (--temperature <number>), not sent to the model by default
+let temperature;
+const temperatureFlagIndex = args.indexOf("--temperature");
+if (temperatureFlagIndex !== -1) {
+  temperature = Number(args[temperatureFlagIndex + 1]);
+  if (!Number.isFinite(temperature)) {
+    console.error("ERROR: --temperature needs a number, e.g. --temperature 0");
+    process.exit(1);
+  }
+}
+
+// Find input file (non-flag argument that isn't the output path or a flag value)
 const inputPath =
   args.find(
     (arg, idx) =>
@@ -60,7 +72,8 @@ const inputPath =
       !arg.startsWith("-") &&
       arg !== outputPath &&
       args[idx - 1] !== "--output" &&
-      args[idx - 1] !== "-o",
+      args[idx - 1] !== "-o" &&
+      args[idx - 1] !== "--temperature",
   ) || null;
 
 // Debug directory
@@ -181,6 +194,7 @@ function printReport({ summary, flagged, warnings, tokenUsage }) {
       llm: !NO_LLM,
       apiKey: OPENAI_API_KEY,
       model: OPENAI_MODEL,
+      temperature,
       maxCandidatesPerCall: envNumber(
         "MAX_CANDIDATES_PER_CALL",
         defaultOptions.maxCandidatesPerCall,

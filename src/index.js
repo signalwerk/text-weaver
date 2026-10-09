@@ -22,6 +22,7 @@ export { defaultKeepHyphens };
 export const defaultOptions = {
   llm: true,
   model: "gpt-4o-mini",
+  temperature: undefined, // not sent unless set
   maxCandidatesPerCall: 20,
   confidenceThreshold: 0.7,
   wordContextBefore: 6,
@@ -376,25 +377,37 @@ export function calculateCost(model, promptTokens, completionTokens) {
   return inputCost + outputCost;
 }
 
+// temperature is only sent when set, since not every model supports it
+// (e.g. reasoning models only accept the default)
+function buildRequestPayload({ model, temperature, system, userContent }) {
+  return {
+    model,
+    ...(temperature != null && { temperature }),
+    response_format: { type: "json_object" },
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: userContent },
+    ],
+  };
+}
+
 async function callOpenAIChatJSON({
   fetchFn,
   apiKey,
   model,
+  temperature,
   system,
   userPayload,
   batchNumber,
   tokenStats,
   onResponse,
 }) {
-  const requestPayload = {
+  const requestPayload = buildRequestPayload({
     model,
-    temperature: 0,
-    response_format: { type: "json_object" },
-    messages: [
-      { role: "system", content: system },
-      { role: "user", content: JSON.stringify(userPayload) },
-    ],
-  };
+    temperature,
+    system,
+    userContent: JSON.stringify(userPayload),
+  });
 
   const res = await fetchFn("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -600,6 +613,7 @@ export function joinSoftLinebreaksDefault(text) {
  * Options (see defaultOptions):
  *   llm                  false = rules only, no API key required
  *   apiKey               OpenAI API key (required when llm is true)
+ *   temperature          sent to the model only when set (number)
  *   model, maxCandidatesPerCall, confidenceThreshold,
  *   wordContextBefore, wordContextAfter
  *   keepHyphens          compounds to always keep (case-insensitive)
@@ -617,6 +631,7 @@ export async function unwrapText(original, options = {}) {
     llm,
     apiKey,
     model,
+    temperature,
     maxCandidatesPerCall,
     confidenceThreshold,
     wordContextBefore,
@@ -723,15 +738,12 @@ export async function unwrapText(original, options = {}) {
           batchNumber: i + 1,
           totalBatches: batches.length,
           sent: llm,
-          payload: {
+          payload: buildRequestPayload({
             model,
-            temperature: 0,
-            response_format: { type: "json_object" },
-            messages: [
-              { role: "system", content: system },
-              { role: "user", content: userPayload },
-            ],
-          },
+            temperature,
+            system,
+            userContent: userPayload,
+          }),
         });
 
         // Only call API in LLM mode
@@ -740,6 +752,7 @@ export async function unwrapText(original, options = {}) {
             fetchFn,
             apiKey,
             model,
+            temperature,
             system,
             userPayload,
             batchNumber: i + 1,
